@@ -107,3 +107,7 @@ change the `PROJECT_DATA_PATH` in `setup_project.py` to the directory you extrac
 
 
 Note: Some notebooks have `if:` in empty code blocks, I use this as code breakers for chunks of code to run when I press "Run all". You can skip to the code after the `if:` block.
+
+## Grid cell decoding method
+
+For a step-by-step guide to our decoding method, check out: [autopi_grid_cell_decoding_repo](https://github.com/PJJ19/autopi_grid_cell_decoding)
