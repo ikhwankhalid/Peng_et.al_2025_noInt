@@ -167,23 +167,25 @@ def filterForConditions(inputDf, lightCondition='dark'):
 # INITIAL TURNING MAGNITUDE CALCULATION
 # ============================================================================
 
-def calculate_initial_turning(sessionSlice, time_window=1.0):
+def calculate_initial_turning(sessionSlice, time_before=1., time_after=0.1):
     """
     Calculate initial turning magnitude for each trial as the total signed angular change 
-    in the first second of search.
+    in a time window around the trial start.
     
     Parameters:
     -----------
     sessionSlice : DataFrame
         Session data containing trials
-    time_window : float
-        Time window in seconds to calculate turning over (default: 1.0 seconds)
+    time_before : float
+        Time in seconds before trial start to include (default: 0.5 seconds)
+    time_after : float
+        Time in seconds after trial start to include (default: 0.5 seconds)
     
     Returns:
     --------
     DataFrame with initialTurning column added
     """
-    print(f"Calculating initial turning magnitude (first {time_window} seconds of search)...")
+    print(f"Calculating initial turning magnitude ({time_before}s before to {time_after}s after trial start)...")
     
     initial_turnings = []
     trial_numbers = []
@@ -202,10 +204,22 @@ def calculate_initial_turning(sessionSlice, time_window=1.0):
         # Sort by time within path
         trial_data = trial_data.sort_values('withinPathTime')
         
-        # Get data from first second
-        initial_data = trial_data[trial_data['withinPathTime'] <= time_window]
+        # Find trial start time in recTime coordinates
+        # The trial start is at the minimum withinPathTime value
+        min_within_path_idx = trial_data['withinPathTime'].idxmin()
+        trial_start_recTime = trial_data.loc[min_within_path_idx, 'recTime']
         
-        if len(initial_data) > 1:  # Need at least 2 points to calculate turning
+        # Define time window around trial start
+        time_window_start = trial_start_recTime - time_before
+        time_window_end = trial_start_recTime + time_after
+        
+        # Filter data within time window using recTime
+        initial_data = trial_data[
+            (trial_data['recTime'] >= time_window_start) &
+            (trial_data['recTime'] <= time_window_end)
+        ]
+        
+        if len(initial_data) > 1:  # Need at least 2 points
             # Get heading values - prefer hdPose for head direction
             if 'hdPose' in initial_data.columns:
                 headings = initial_data['hdPose'].values
@@ -465,7 +479,9 @@ def get_circular_stats_dataFrame(sessionName, inputDf, res=None, lightCondition=
         sessionSlice = sessionSlice[(sessionSlice.speed > 10)].copy()
     
     # Calculate initial turning magnitude
-    initial_turning_df = calculate_initial_turning(sessionSlice)
+    initial_turning_df = calculate_initial_turning(
+        sessionSlice
+    )
     
     combinedDf = get_combinedDf(sessionSlice, res=res.copy(), sesName=sessionName)
     combinedDf = combinedDf.dropna().copy()
@@ -713,7 +729,9 @@ def plot_model_prediction_heatmap(ax, sesName, condition='atLever_dark',
         sessionSlice = sessionSlice[sessionSlice.speed > 10]
     
     # Calculate initial turning magnitude for this session
-    initial_turning_df = calculate_initial_turning(sessionSlice)
+    initial_turning_df = calculate_initial_turning(
+        sessionSlice
+    )
     
     # Get combined dataframe
     combinedDf = get_combinedDf(sessionSlice.copy(), res=res.copy(), sesName=sesName)
