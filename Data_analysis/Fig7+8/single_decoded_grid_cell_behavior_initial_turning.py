@@ -167,7 +167,7 @@ def filterForConditions(inputDf, lightCondition='dark'):
 # INITIAL TURNING MAGNITUDE CALCULATION
 # ============================================================================
 
-def calculate_initial_turning(sessionSlice, time_before=1., time_after=0.1):
+def calculate_initial_turning(sessionSlice, time_before=60., time_after=0.0):
     """
     Calculate initial turning magnitude for each trial as the total signed angular change 
     in a time window around the trial start.
@@ -192,28 +192,33 @@ def calculate_initial_turning(sessionSlice, time_before=1., time_after=0.1):
     
     # Process each trial
     for trial in sessionSlice['trialNo'].unique():
-        # Get search phase data for this trial
-        trial_data = sessionSlice[
-            (sessionSlice['trialNo'] == trial) & 
-            (sessionSlice['condition'] == 'searchToLeverPath_dark')
-        ].copy()
+        # Get ALL data for this trial (not just search phase)
+        trial_data = sessionSlice[sessionSlice['trialNo'] == trial].copy()
         
         if len(trial_data) == 0:
             continue
         
-        # Sort by time within path
-        trial_data = trial_data.sort_values('withinPathTime')
+        # Find trial start time from search phase data
+        search_data = trial_data[
+            trial_data['condition'] == 'searchToLeverPath_dark'
+        ]
         
-        # Find trial start time in recTime coordinates
+        if len(search_data) == 0:
+            continue
+        
+        # Sort search data by time within path
+        search_data = search_data.sort_values('withinPathTime')
+        
         # The trial start is at the minimum withinPathTime value
-        min_within_path_idx = trial_data['withinPathTime'].idxmin()
-        trial_start_recTime = trial_data.loc[min_within_path_idx, 'recTime']
+        min_within_path_idx = search_data['withinPathTime'].idxmin()
+        trial_start_recTime = search_data.loc[min_within_path_idx, 'recTime']
         
         # Define time window around trial start
         time_window_start = trial_start_recTime - time_before
         time_window_end = trial_start_recTime + time_after
         
-        # Filter data within time window using recTime
+        # Filter the FULL trial data within time window using recTime
+        # This allows capturing data from before the search phase begins
         initial_data = trial_data[
             (trial_data['recTime'] >= time_window_start) &
             (trial_data['recTime'] <= time_window_end)
