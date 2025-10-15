@@ -37,7 +37,7 @@ from spikeA.Spike_train_loader import Spike_train_loader
 from spikeA.Cell_group import Cell_group
 from spikeA.Dat_file_reader import Dat_file_reader
 
-PROJECT_DATA_PATH = '/ext_drives/d91/data/projects/jingjie/Peng_et.al_2025_noInt/'
+PROJECT_DATA_PATH = 'E:\GitHub\Peng_et.al_2025_noInt\Peng'
 
 # These would be the sessions with >0.5 mvl in the last random foraging session 
 # excluding when the animal was near the border of the arena
