@@ -166,7 +166,7 @@ def filterForConditions(inputDf, lightCondition='dark'):
 # INITIAL HEADING CALCULATION
 # ============================================================================
 
-def calculate_initial_heading(sessionSlice, time_window=0.5):
+def calculate_initial_heading(sessionSlice, time_window=2):
     """
     Calculate initial heading for each trial as average of first few seconds of search.
     
@@ -269,11 +269,12 @@ def homing_angle_corr_stats(x, y, signLevel=0.025):
     
     Returns:
     --------
-    tuple : (realR, slope, meanShuffleR, significant)
+    tuple : (realR, slope, meanShuffleR, significant, pValue)
         - realR: circular correlation coefficient
         - slope: slope of linear regression
         - meanShuffleR: mean of shuffled correlations
         - significant: boolean indicating if correlation is significant
+        - pValue: two-tailed p-value from permutation test
     """
     realR = circcorrcoef(x, y)
     anglesCentered = centerAngles(x)
@@ -290,13 +291,16 @@ def homing_angle_corr_stats(x, y, signLevel=0.025):
         np.random.shuffle(xr)
         shufR[i] = circcorrcoef(xr, y)
     
+    # Calculate two-tailed p-value
+    pValue = np.sum(np.abs(shufR) >= np.abs(realR)) / n
+    
     signPlus = np.quantile(shufR, 1 - signLevel)
     signMinus = np.quantile(shufR, signLevel)
     
     if realR < signMinus or realR > signPlus:
-        return (realR, slope, np.nanmean(shufR), True)
+        return (realR, slope, np.nanmean(shufR), True, pValue)
     else:
-        return (realR, slope, np.nanmean(shufR), False)
+        return (realR, slope, np.nanmean(shufR), False, pValue)
 
 
 def get_circular_mean_shift_rad(hist, fromCenter=True, convolution=False, shiftedMeanArray=None, gaus=True):
@@ -560,14 +564,16 @@ def plot_kdeplot(ax, inputDf, xlim=(0, np.pi), ylim=(0, 1.5), c='#12c2e9',
     
     ax.tick_params(axis='both', which='both', labelsize=GLOBALFONTSIZE)
     
-    realR, slope, sigN, _ = homing_angle_corr_stats(xVal, yVal, signLevel=signLevel)
+    realR, slope, sigN, _, pValue = homing_angle_corr_stats(xVal, yVal, signLevel=signLevel)
     
     if sigN:
         label_x = 0.65
         label_y1 = 0.05
         label_y2 = 0.17
+        label_y3 = 0.29
         ax.text(label_x, label_y1, 's: ' + str(round(slope, 3)), fontsize=GLOBALFONTSIZE, transform=ax.transAxes)
         ax.text(label_x, label_y2, f'r: ' + str(round(realR, 3)), fontsize=GLOBALFONTSIZE, transform=ax.transAxes)
+        ax.text(label_x, label_y3, f'p: ' + str(round(pValue, 4)), fontsize=GLOBALFONTSIZE, transform=ax.transAxes)
     else:
         ax.text(0.1, 0.8, 'Not sig.', fontsize=GLOBALFONTSIZE, transform=ax.transAxes)
     

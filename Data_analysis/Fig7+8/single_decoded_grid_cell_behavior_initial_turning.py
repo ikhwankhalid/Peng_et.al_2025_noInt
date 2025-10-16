@@ -167,7 +167,7 @@ def filterForConditions(inputDf, lightCondition='dark'):
 # INITIAL TURNING MAGNITUDE CALCULATION
 # ============================================================================
 
-def calculate_initial_turning(sessionSlice, time_before=60., time_after=0.0):
+def calculate_initial_turning(sessionSlice, time_before=0.5, time_after=0.5):
     """
     Calculate initial turning magnitude for each trial as the total signed angular change 
     in a time window around the trial start.
