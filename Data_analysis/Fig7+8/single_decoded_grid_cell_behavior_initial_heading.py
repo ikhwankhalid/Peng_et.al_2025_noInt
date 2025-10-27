@@ -166,7 +166,7 @@ def filterForConditions(inputDf, lightCondition='dark'):
 # INITIAL HEADING CALCULATION
 # ============================================================================
 
-def calculate_initial_heading(sessionSlice, time_window=2):
+def calculate_initial_heading(sessionSlice, time_window=4):
     """
     Calculate initial heading for each trial as average of first few seconds of search.
     
