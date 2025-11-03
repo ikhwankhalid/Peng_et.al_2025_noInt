@@ -15,11 +15,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.colors import LinearSegmentedColormap
-import seaborn as sns
 import pickle
 import math
 from scipy import stats
-from scipy.stats import pearsonr
+from scipy.stats import pearsonr, gaussian_kde
 from tqdm import tqdm
 import sys
 import os
@@ -166,7 +165,7 @@ def filterForConditions(inputDf, lightCondition='dark'):
 # INITIAL HEADING CALCULATION
 # ============================================================================
 
-def calculate_initial_heading(sessionSlice, time_window=4):
+def calculate_initial_heading(sessionSlice, time_window=1):
     """
     Calculate initial heading for each trial as average of first few seconds of search.
     
@@ -536,15 +535,29 @@ def plot_kdeplot(ax, inputDf, xlim=(0, np.pi), ylim=(0, 1.5), c='#12c2e9',
     signLevel : float
         Significance level (default: 0.025)
     """
-    # Create kdeplot
-    sns.kdeplot(data=inputDf, x=var_x, y=var_y, ax=ax, fill=True, alpha=1, color=c)
-    sns.scatterplot(data=inputDf, x=var_x, y=var_y, ax=ax, s=40, edgecolor='black', linewidth=1, color=c)
+    xVal = inputDf[var_x].values
+    yVal = inputDf[var_y].values
+    
+    # Create 2D KDE plot using matplotlib and scipy
+    try:
+        # Calculate the point density
+        xy = np.vstack([xVal, yVal])
+        z = gaussian_kde(xy)(xy)
+        
+        # Sort points by density for better visualization
+        idx = z.argsort()
+        x_sorted, y_sorted, z_sorted = xVal[idx], yVal[idx], z[idx]
+        
+        # Create scatter plot with density colors
+        ax.scatter(x_sorted, y_sorted, c=z_sorted, s=40, cmap='Blues', 
+                  edgecolor='black', linewidth=1, alpha=0.8)
+    except:
+        # Fallback to simple scatter if KDE fails
+        ax.scatter(xVal, yVal, s=40, edgecolor='black', linewidth=1, 
+                  color=c, alpha=0.8)
     
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    
-    xVal = inputDf[var_x].values
-    yVal = inputDf[var_y].values
     
     plotRegressionLine(ax, x=xVal, y=yVal, regColor='#ff9e00')
     
@@ -581,6 +594,107 @@ def plot_kdeplot(ax, inputDf, xlim=(0, np.pi), ylim=(0, 1.5), c='#12c2e9',
     
     ax.set_xlim(-borders, borders)
     ax.set_ylim(-borders, borders)
+
+
+def plot_correlation_distribution(ax, accumulated_stats_df, phase_var='searchRad',
+                                   xlabel='Drift-initial heading corr. (r)',
+                                   ylabel='Sessions', legend=True, ylim=50, 
+                                   title='', set_ylabel=True):
+    """
+    Plot histogram of circular correlation coefficients accumulated across sessions.
+    
+    Parameters:
+    -----------
+    ax : matplotlib axis
+        Axis to plot on
+    accumulated_stats_df : DataFrame
+        DataFrame with columns: 'realR', 'sig', 'phase_var'
+        Contains accumulated correlation statistics from all sessions up to current
+    phase_var : str
+        Which phase variable to filter for ('searchRad', 'atLeverRad', 'homingRad')
+    xlabel : str
+        X-axis label
+    ylabel : str
+        Y-axis label
+    legend : bool
+        Whether to show legend
+    ylim : float
+        Y-axis upper limit
+    title : str
+        Plot title
+    set_ylabel : bool
+        Whether to set y-axis label
+    """
+    # Filter for the specific phase
+    phase_data = accumulated_stats_df[accumulated_stats_df['phase_var'] == phase_var].copy()
+    
+    if len(phase_data) == 0:
+        ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        return
+    
+    # Map boolean to string labels
+    phase_data['sig_label'] = phase_data['sig'].map({True: 'Significant', False: 'Non sign.'})
+    
+    # Color palette
+    palette = {'Significant': '#1a659e', 'Non sign.': '#ff6b35'}
+    order = ['Significant', 'Non sign.']
+    
+    # Create histogram
+    sns.histplot(
+        data=phase_data, x='realR', hue='sig_label', 
+        bins=10, kde=False, palette=palette, 
+        legend=legend, hue_order=order, ax=ax
+    )
+    
+    # Styling
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    if title:
+        ax.set_title(title, fontsize=GLOBALFONTSIZE, fontweight='bold', y=1.0)
+    
+    if set_ylabel:
+        ax.set_ylabel(ylabel, fontsize=GLOBALFONTSIZE, labelpad=1)
+    else:
+        ax.set_ylabel('', fontsize=GLOBALFONTSIZE)
+        ax.set_yticks([])
+    
+    ax.set_xlabel(xlabel, fontsize=GLOBALFONTSIZE)
+    ax.set_xticks(ticks=[-1, 0, 1])
+    ax.set_xticklabels(['-1', '0', '1'], fontsize=GLOBALFONTSIZE)
+    ax.set_ylim(0, ylim)
+    
+    # Add vertical line at zero
+    ax.axvline(x=0, color='#8A817C', linestyle='--', lw=2, ymax=0.68)
+    
+    # Statistical test (Wilcoxon signed-rank test against 0)
+    realR_values = phase_data['realR'].values
+    if len(realR_values) > 0:
+        stat, p_value = stats.wilcoxon(realR_values)
+        
+        # Display statistics
+        n_sessions = len(phase_data)
+        ax.text(0.07, 0.9, f'N = {n_sessions}', fontsize=GLOBALFONTSIZE, transform=ax.transAxes)
+        
+        # Format p-value
+        if p_value < 0.0001:
+            p_text = 'p < 0.0001'
+        else:
+            p_text = f'p = {round(p_value, 4)}'
+        ax.text(0.07, 0.78, p_text, fontsize=GLOBALFONTSIZE, transform=ax.transAxes, fontweight='bold')
+    
+    # Adjust legend
+    if legend:
+        handles, labels = ax.get_legend_handles_labels()
+        ax.legend(
+            handles, labels, fontsize=GLOBALFONTSIZE - 1, 
+            frameon=False, loc='lower left', 
+            bbox_to_anchor=(-0.01, 0.65)
+        )
+    
+    ax.tick_params(axis='both', which='both', labelsize=GLOBALFONTSIZE)
 
 
 
@@ -791,8 +905,9 @@ def save_session_info(session_list, output_path):
 
 def create_multi_session_plot(session_list, output_path=None, height_per_session=4):
     """
-    Create multi-session plot with (2N)×3 subplots showing search, at lever, and homing phases
-    sorted by initial heading. Each session has two rows: trial matrices and correlation plots.
+    Create multi-session plot with (3N)×3 subplots showing search, at lever, and homing phases
+    sorted by initial heading. Each session has three rows: trial matrices, correlation plots,
+    and correlation distribution histograms.
     
     Parameters:
     -----------
@@ -801,26 +916,30 @@ def create_multi_session_plot(session_list, output_path=None, height_per_session
     output_path : str, optional
         Path to save figure. If None, displays instead.
     height_per_session : float, optional
-        Height in inches per session row pair (default: 4)
+        Height in inches per session row triplet (default: 4)
     """
     n_sessions = len(session_list)
     print(f"\nCreating multi-session plot for {n_sessions} session(s)")
     
-    # Calculate figure size - now we have 2 rows per session
+    # Calculate figure size - now we have 3 rows per session
     fig_width = 12
-    fig_height = 2 * n_sessions * height_per_session
+    fig_height = 3 * n_sessions * height_per_session
     
-    # Create figure with (2N)×3 grid
+    # Create figure with (3N)×3 grid
     fig = plt.figure(figsize=(fig_width, fig_height))
-    gs = gridspec.GridSpec(2 * n_sessions, 3, figure=fig, wspace=0.3, hspace=0.5)
+    gs = gridspec.GridSpec(3 * n_sessions, 3, figure=fig, wspace=0.3, hspace=0.5)
     
-    # Loop through sessions and create 6 panels per session (2 rows × 3 columns)
+    # Initialize accumulator for correlation statistics
+    accumulated_stats = []
+    
+    # Loop through sessions and create 9 panels per session (3 rows × 3 columns)
     for session_idx, session_name in enumerate(session_list):
         print(f"  Processing session {session_idx + 1}/{n_sessions}: {session_name}")
         
         # Calculate row indices for this session
-        heatmap_row = 2 * session_idx
-        correlation_row = 2 * session_idx + 1
+        heatmap_row = 3 * session_idx
+        correlation_row = 3 * session_idx + 1
+        histogram_row = 3 * session_idx + 2
         
         # ===== FIRST ROW: TRIAL MATRICES =====
         
@@ -863,12 +982,29 @@ def create_multi_session_plot(session_list, output_path=None, height_per_session
         try:
             c_statsDf = get_circular_stats_dataFrame(session_name, allSessionDf.copy(), res.copy())
             
+            # Calculate correlation statistics for each phase
+            phase_vars = ['searchRad', 'atLeverRad', 'homingRad']
+            for phase_var in phase_vars:
+                xVal = c_statsDf[phase_var].values
+                yVal = c_statsDf['initialHeading'].values
+                realR, slope, _, sig, pValue = homing_angle_corr_stats(xVal, yVal)
+                
+                # Add to accumulator
+                accumulated_stats.append({
+                    'sessionName': session_name,
+                    'phase_var': phase_var,
+                    'realR': realR,
+                    'slope': slope,
+                    'sig': sig,
+                    'pValue': pValue
+                })
+            
             # Left panel: Search correlation
             ax3 = fig.add_subplot(gs[correlation_row, 0])
             plot_kdeplot(
                 ax3, c_statsDf, 
                 ylabel='Initial heading', 
-                xlabel='Decoded trial drift' if session_idx == n_sessions - 1 else '',
+                xlabel='',
                 var_x='searchRad', 
                 var_y='initialHeading', 
                 c='#cfbaf0'
@@ -879,7 +1015,7 @@ def create_multi_session_plot(session_list, output_path=None, height_per_session
             plot_kdeplot(
                 ax4, c_statsDf, 
                 ylabel='Initial heading', 
-                xlabel='Decoded trial drift' if session_idx == n_sessions - 1 else '',
+                xlabel='',
                 var_x='atLeverRad', 
                 var_y='initialHeading', 
                 set_ylabel=False, 
@@ -891,7 +1027,7 @@ def create_multi_session_plot(session_list, output_path=None, height_per_session
             plot_kdeplot(
                 ax5, c_statsDf, 
                 ylabel='Initial heading', 
-                xlabel='Decoded trial drift' if session_idx == n_sessions - 1 else '',
+                xlabel='',
                 var_x='homingRad', 
                 var_y='initialHeading', 
                 set_ylabel=False, 
@@ -904,6 +1040,57 @@ def create_multi_session_plot(session_list, output_path=None, height_per_session
             for col_idx in range(3):
                 ax = fig.add_subplot(gs[correlation_row, col_idx])
                 ax.text(0.5, 0.5, 'Data unavailable', ha='center', va='center', transform=ax.transAxes)
+                ax.set_xticks([])
+                ax.set_yticks([])
+        
+        # ===== THIRD ROW: CORRELATION DISTRIBUTION HISTOGRAMS =====
+        
+        # Convert accumulated stats to DataFrame
+        if len(accumulated_stats) > 0:
+            accumulated_df = pd.DataFrame(accumulated_stats)
+            
+            # Left panel: Search histogram
+            ax6 = fig.add_subplot(gs[histogram_row, 0])
+            plot_correlation_distribution(
+                ax6, accumulated_df, 
+                phase_var='searchRad',
+                xlabel='Drift-initial heading corr. (r)' if session_idx == n_sessions - 1 else '',
+                ylabel='Sessions',
+                legend=(session_idx == 0),
+                ylim=n_sessions + 5,
+                title=''
+            )
+            
+            # Middle panel: At lever histogram
+            ax7 = fig.add_subplot(gs[histogram_row, 1])
+            plot_correlation_distribution(
+                ax7, accumulated_df, 
+                phase_var='atLeverRad',
+                xlabel='Drift-initial heading corr. (r)' if session_idx == n_sessions - 1 else '',
+                ylabel='',
+                legend=False,
+                ylim=n_sessions + 5,
+                title='',
+                set_ylabel=False
+            )
+            
+            # Right panel: Homing histogram
+            ax8 = fig.add_subplot(gs[histogram_row, 2])
+            plot_correlation_distribution(
+                ax8, accumulated_df, 
+                phase_var='homingRad',
+                xlabel='Drift-initial heading corr. (r)' if session_idx == n_sessions - 1 else '',
+                ylabel='',
+                legend=False,
+                ylim=n_sessions + 5,
+                title='',
+                set_ylabel=False
+            )
+        else:
+            # Create empty histogram plots
+            for col_idx in range(3):
+                ax = fig.add_subplot(gs[histogram_row, col_idx])
+                ax.text(0.5, 0.5, 'No correlation data', ha='center', va='center', transform=ax.transAxes)
                 ax.set_xticks([])
                 ax.set_yticks([])
     
