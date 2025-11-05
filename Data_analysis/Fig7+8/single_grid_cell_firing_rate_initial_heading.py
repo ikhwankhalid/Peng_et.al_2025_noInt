@@ -778,38 +778,68 @@ def plot_firing_rate_heatmap(ax, cellID, condition, trial_matrix_dict, res_df,
 # MAIN EXECUTION
 # ============================================================================
 
-def create_multi_cell_plot(session_name, output_path=None, height_per_cell=4):
+def create_multi_cell_plot(session_name,
+                           condition_to_plot='searchToLeverPath',
+                           n_cells_total=10,
+                           cells_to_display=[0, 1, 2],
+                           output_path=None,
+                           height_per_row=4):
     """
-    Create multi-cell plot with (3N)×3 subplots for top N cells in a session.
+    Create 3×3 grid plot showing firing rates for selected grid cells.
 
-    Each cell has three rows:
-    1. Trial matrices (Search | At Lever | Homing)
-    2. Correlation plots (Peak vs Initial Heading)
-    3. Correlation distribution histograms
+    Layout:
+    -------
+    Row 0: [Cell 1 Heatmap] [Cell 2 Heatmap] [Cell 3 Heatmap]
+    Row 1: [Cell 1 Corr.  ] [Cell 2 Corr.  ] [Cell 3 Corr.  ]
+    Row 2: [    Aggregate Histogram (spans all 3 columns)    ]
 
     Parameters:
     -----------
     session_name : str
         Session name to analyze
+    condition_to_plot : str
+        Behavioral phase to visualize (default: 'searchToLeverPath')
+        Options: 'searchToLeverPath', 'atLever', 'homingFromLeavingLeverToPeriphery'
+    n_cells_total : int
+        Total number of top MVL cells to include in aggregate statistics (default: 10)
+    cells_to_display : list of int
+        Indices of 3 cells (from top N) to display in rows 0-1 (default: [0, 1, 2])
+        Example: [0, 1, 2] = top 3 cells, [0, 5, 9] = 1st, 6th, 10th cells
     output_path : str, optional
         Path to save figure
-    height_per_cell : float
-        Height in inches per cell row triplet (default: 4)
+    height_per_row : float
+        Height in inches per row (default: 4)
     """
     print(f"\n{'='*80}")
     print(f"Processing session: {session_name}")
+    print(f"  Condition: {condition_to_plot}")
+    print(f"  Total cells for statistics: {n_cells_total}")
+    print(f"  Cells to display: {cells_to_display}")
     print(f"{'='*80}")
 
-    # Select top 3 cells by vector length
+    # Validate cells_to_display parameter
+    if len(cells_to_display) != 3:
+        raise ValueError(f"cells_to_display must have exactly 3 elements, got {len(cells_to_display)}")
+
+    if any(idx < 0 or idx >= n_cells_total for idx in cells_to_display):
+        raise ValueError(f"cells_to_display indices must be in range [0, {n_cells_total-1}]")
+
+    # Select top N cells by vector length
     top_cells = select_top_cells_by_vector_length(
-        session_name, hdLeverCenteredLeftRightHeadingError, gc, n=20
+        session_name, hdLeverCenteredLeftRightHeadingError, gc, n=n_cells_total
     )
 
     if len(top_cells) == 0:
         print(f"  ERROR: No valid cells found for session {session_name}")
         return None
 
-    n_cells = len(top_cells)
+    if len(top_cells) < n_cells_total:
+        print(f"  WARNING: Only {len(top_cells)} cells found, requested {n_cells_total}")
+        n_cells_total = len(top_cells)
+
+    # Validate that selected cells exist
+    if max(cells_to_display) >= len(top_cells):
+        raise ValueError(f"Cell index {max(cells_to_display)} out of range, only {len(top_cells)} cells available")
 
     # Calculate initial heading for this session
     print(f"\nCalculating initial heading for {session_name}...")
@@ -822,129 +852,181 @@ def create_multi_cell_plot(session_name, output_path=None, height_per_cell=4):
         print(f"  ERROR: No initial heading data for session {session_name}")
         return None
 
-    # Create figure
+    # Create figure with 3×3 grid
     fig_width = 12
-    fig_height = 3 * n_cells * height_per_cell
+    fig_height = 3 * height_per_row
     fig = plt.figure(figsize=(fig_width, fig_height))
-    gs = gridspec.GridSpec(3 * n_cells, 3, figure=fig, wspace=0.3, hspace=0.5)
+    gs = gridspec.GridSpec(3, 3, figure=fig,
+                          wspace=0.3,
+                          hspace=0.4,
+                          height_ratios=[1, 1, 1])
 
-    # Initialize accumulator for correlation statistics
-    accumulated_stats = []
+    # Determine condition label for title
+    condition_label = condition_to_plot.replace('ToLeverPath', '').replace('FromLeavingLeverToPeriphery', '').replace('atLever', 'At Lever').capitalize()
 
-    # Loop through cells
-    for cell_idx, cellID in enumerate(top_cells):
-        print(f"\n  Processing cell {cell_idx + 1}/{n_cells}: {cellID}")
+    # ===== ROW 0: TRIAL MATRIX HEATMAPS FOR 3 SELECTED CELLS =====
 
-        # Calculate row indices for this cell
-        heatmap_row = 3 * cell_idx
-        correlation_row = 3 * cell_idx + 1
-        histogram_row = 3 * cell_idx + 2
+    print(f"\nRow 0: Plotting trial matrices...")
+    for col_idx, display_idx in enumerate(cells_to_display):
+        cell_id = top_cells[display_idx]
+        print(f"  Column {col_idx}: Cell {display_idx+1}/{n_cells_total} ({cell_id})")
 
-        # ===== FIRST ROW: TRIAL MATRICES =====
+        ax = fig.add_subplot(gs[0, col_idx])
 
-        conditions = ['searchToLeverPath', 'atLever', 'homingFromLeavingLeverToPeriphery']
-        condition_labels = ['Search', 'At Lever', 'Homing']
+        ylabel_text = f'Cell {display_idx+1}\nTrials' if col_idx == 0 else f'Cell {display_idx+1}'
 
-        for col_idx, (cond, label) in enumerate(zip(conditions, condition_labels)):
-            ax = fig.add_subplot(gs[heatmap_row, col_idx])
+        plot_firing_rate_heatmap(
+            ax, cell_id, condition_to_plot, hdLeverCenteredTrialMatrix,
+            res, initial_heading_df,
+            set_ticks=True,
+            ylabel=ylabel_text,
+            xlabel=''
+        )
 
-            ylabel_text = f'{cellID}\nTrials' if col_idx == 0 and cell_idx == 0 else (cellID if col_idx == 0 else '')
+        if col_idx == 0:
+            ax.set_title(condition_label, fontsize=GLOBALFONTSIZE + 2, loc='left')
 
-            plot_firing_rate_heatmap(
-                ax, cellID, cond, hdLeverCenteredTrialMatrix, res,
-                initial_heading_df, set_ticks=True, ylabel=ylabel_text, xlabel=''
-            )
+    # ===== ROW 1: CORRELATION PLOTS FOR 3 SELECTED CELLS =====
 
-            if cell_idx == 0:
-                ax.set_title(label, fontsize=GLOBALFONTSIZE + 2)
+    print(f"\nRow 1: Plotting correlations...")
+    displayed_cell_stats = []
 
-        # ===== SECOND ROW: CORRELATION PLOTS =====
+    for col_idx, display_idx in enumerate(cells_to_display):
+        cell_id = top_cells[display_idx]
+        ax = fig.add_subplot(gs[1, col_idx])
 
         try:
-            for col_idx, (cond, label) in enumerate(zip(conditions, condition_labels)):
-                # Extract trial data
-                condition_full = f'{cond}_dark'
-                trial_df = extract_firing_rate_trial_matrix(
-                    cellID, condition_full, hdLeverCenteredTrialMatrix, res,
-                    initial_heading_df, light='dark'
-                )
+            # Extract trial data for this cell and condition
+            condition_full = f'{condition_to_plot}_dark'
+            trial_df = extract_firing_rate_trial_matrix(
+                cell_id, condition_full,
+                hdLeverCenteredTrialMatrix, res, initial_heading_df
+            )
 
-                if len(trial_df) == 0:
-                    continue
+            if len(trial_df) == 0:
+                ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+                ax.set_xticks([])
+                ax.set_yticks([])
+                continue
 
-                # Calculate peak firing directions
-                peak_dirs = get_peak_firing_from_slice(trial_df, convolution=GLOBALCONV)
+            # Calculate peak firing directions
+            peak_dirs = get_peak_firing_from_slice(trial_df, convolution=GLOBALCONV)
 
-                if len(peak_dirs) == 0:
-                    continue
+            if len(peak_dirs) == 0:
+                ax.text(0.5, 0.5, 'No peaks', ha='center', va='center', transform=ax.transAxes)
+                ax.set_xticks([])
+                ax.set_yticks([])
+                continue
 
-                # Add to dataframe
-                trial_df_sorted = trial_df.sort_values(by='initialHeading', ascending=True)
-                trial_df_sorted['peakFiringDir'] = peak_dirs
+            # Sort and add peak directions
+            trial_df_sorted = trial_df.sort_values(by='initialHeading', ascending=True)
+            trial_df_sorted['peakFiringDir'] = peak_dirs
 
-                # Calculate correlation
-                xVal = trial_df_sorted['initialHeading'].values
-                yVal = trial_df_sorted['peakFiringDir'].values
-                realR, slope, _, sig, pValue = homing_angle_corr_stats(xVal, yVal)
+            # Calculate correlation statistics
+            xVal = trial_df_sorted['initialHeading'].values
+            yVal = trial_df_sorted['peakFiringDir'].values
+            realR, slope, _, sig, pValue = homing_angle_corr_stats(xVal, yVal)
 
-                # Add to accumulator
-                accumulated_stats.append({
-                    'cellID': cellID,
-                    'condition': label,
-                    'realR': realR,
-                    'slope': slope,
-                    'sig': sig,
-                    'pValue': pValue
-                })
+            # Store for aggregate histogram
+            displayed_cell_stats.append({
+                'cellID': cell_id,
+                'display_idx': display_idx,
+                'realR': realR,
+                'slope': slope,
+                'sig': sig,
+                'pValue': pValue
+            })
 
-                # Plot correlation
-                ax = fig.add_subplot(gs[correlation_row, col_idx])
-                plot_kdeplot(
-                    ax, trial_df_sorted,
-                    ylabel='Peak firing dir.',
-                    xlabel='',
-                    set_ylabel=(col_idx == 0),
-                    c='#cfbaf0'
-                )
+            # Plot correlation
+            plot_kdeplot(
+                ax, trial_df_sorted,
+                ylabel='Peak firing dir.' if col_idx == 0 else '',
+                xlabel='Initial heading',
+                set_ylabel=(col_idx == 0),
+                c='#cfbaf0'
+            )
 
         except Exception as e:
-            print(f"    Warning: Could not create correlation plots for {cellID}: {e}")
-            for col_idx in range(3):
-                ax = fig.add_subplot(gs[correlation_row, col_idx])
-                ax.text(0.5, 0.5, 'Data unavailable', ha='center', va='center', transform=ax.transAxes)
-                ax.set_xticks([])
-                ax.set_yticks([])
+            print(f"    Warning: Could not create correlation plot for cell {display_idx+1}: {e}")
+            ax.text(0.5, 0.5, 'Error', ha='center', va='center', transform=ax.transAxes)
+            ax.set_xticks([])
+            ax.set_yticks([])
 
-        # ===== THIRD ROW: CORRELATION DISTRIBUTION HISTOGRAMS =====
+    # ===== ROW 2: AGGREGATE HISTOGRAM FOR ALL N_CELLS_TOTAL =====
 
-        if len(accumulated_stats) > 0:
-            accumulated_df = pd.DataFrame(accumulated_stats)
+    print(f"\nRow 2: Computing aggregate statistics for top {n_cells_total} cells...")
 
-            for col_idx, label in enumerate(condition_labels):
-                ax = fig.add_subplot(gs[histogram_row, col_idx])
+    # Calculate correlations for ALL top N cells (not just the 3 displayed)
+    all_cell_stats = []
+    for cell_idx in range(min(n_cells_total, len(top_cells))):
+        cell_id = top_cells[cell_idx]
 
-                # Filter for this condition
-                cond_data = accumulated_df[accumulated_df['condition'] == label]
+        try:
+            condition_full = f'{condition_to_plot}_dark'
+            trial_df = extract_firing_rate_trial_matrix(
+                cell_id, condition_full,
+                hdLeverCenteredTrialMatrix, res, initial_heading_df
+            )
 
-                plot_correlation_distribution(
-                    ax, cond_data,
-                    xlabel='Peak-initial heading corr. (r)' if cell_idx == n_cells - 1 else '',
-                    ylabel='Cells' if col_idx == 0 else '',
-                    legend=(cell_idx == 0 and col_idx == 0),
-                    ylim=n_cells + 2,
-                    title='',
-                    set_ylabel=(col_idx == 0)
-                )
-        else:
-            for col_idx in range(3):
-                ax = fig.add_subplot(gs[histogram_row, col_idx])
-                ax.text(0.5, 0.5, 'No correlation data', ha='center', va='center', transform=ax.transAxes)
-                ax.set_xticks([])
-                ax.set_yticks([])
+            if len(trial_df) == 0:
+                continue
+
+            peak_dirs = get_peak_firing_from_slice(trial_df, convolution=GLOBALCONV)
+
+            if len(peak_dirs) == 0:
+                continue
+
+            trial_df_sorted = trial_df.sort_values(by='initialHeading', ascending=True)
+            trial_df_sorted['peakFiringDir'] = peak_dirs
+
+            xVal = trial_df_sorted['initialHeading'].values
+            yVal = trial_df_sorted['peakFiringDir'].values
+            realR, slope, _, sig, pValue = homing_angle_corr_stats(xVal, yVal)
+
+            all_cell_stats.append({
+                'cellID': cell_id,
+                'cell_idx': cell_idx,
+                'realR': realR,
+                'slope': slope,
+                'sig': sig,
+                'pValue': pValue
+            })
+
+            if (cell_idx + 1) % 5 == 0:
+                print(f"  Processed {cell_idx + 1}/{min(n_cells_total, len(top_cells))} cells...")
+
+        except Exception as e:
+            print(f"    Warning: Could not process cell {cell_idx+1} ({cell_id}): {e}")
+            continue
+
+    print(f"  Successfully processed {len(all_cell_stats)}/{min(n_cells_total, len(top_cells))} cells")
+
+    # Create subplot spanning all 3 columns
+    ax_hist = fig.add_subplot(gs[2, :])  # Spans all columns in row 2
+
+    if len(all_cell_stats) > 0:
+        stats_df = pd.DataFrame(all_cell_stats)
+
+        plot_correlation_distribution(
+            ax_hist, stats_df,
+            xlabel='Peak-initial heading corr. (r)',
+            ylabel='Grid cells',
+            legend=True,
+            ylim=max(10, len(all_cell_stats) + 5),
+            title=f'Aggregate Statistics (Top {len(all_cell_stats)} Cells)',
+            set_ylabel=True
+        )
+    else:
+        ax_hist.text(0.5, 0.5, 'No correlation data available',
+                    ha='center', va='center', transform=ax_hist.transAxes,
+                    fontsize=GLOBALFONTSIZE + 2)
+        ax_hist.set_xticks([])
+        ax_hist.set_yticks([])
 
     # Add overall title
     fig.suptitle(
-        f'Grid Cell Firing Rates Sorted by Initial Heading\nSession: {session_name}',
+        f'Grid Cell Firing Rates - {condition_label} Phase\n'
+        f'Session: {session_name} | Displaying cells {[i+1 for i in cells_to_display]} of top {n_cells_total}',
         fontsize=GLOBALFONTSIZE + 4, y=0.995
     )
 
@@ -960,25 +1042,67 @@ def create_multi_cell_plot(session_name, output_path=None, height_per_cell=4):
 
 
 if __name__ == "__main__":
-    # Example usage
+    # Example usage with new 3×3 layout
     session_name = 'jp486-24032023-0108'
 
     print("\n" + "="*80)
     print("CREATING GRID CELL FIRING RATE ANALYSIS SORTED BY INITIAL HEADING")
     print("="*80)
 
-    # Create the plot
+    # Output directory
     output_dir = 'E:/GitHub/Peng_et.al_2025_noInt/Peng/Output'
     os.makedirs(output_dir, exist_ok=True)
-    output_file = f'{output_dir}/firing_rate_initial_heading_{session_name}.pdf'
 
+    # Example 1: Top 3 cells during search phase, aggregate stats from top 10
+    print("\n\nExample 1: Search phase, top 3 cells, aggregate from top 10")
+    output_file = f'{output_dir}/firing_rate_search_top3_{session_name}.pdf'
     fig = create_multi_cell_plot(
         session_name,
+        condition_to_plot='searchToLeverPath',
+        n_cells_total=40,
+        cells_to_display=[1, 5, 6],
         output_path=output_file,
-        height_per_cell=4
+        height_per_row=4
     )
+
+    # Example 2: At lever phase, cells 1, 3, 5 from top 20
+    # Uncomment to run:
+    # print("\n\nExample 2: At lever phase, cells 1, 3, 5 from top 20")
+    # output_file = f'{output_dir}/firing_rate_lever_selected_{session_name}.pdf'
+    # fig = create_multi_cell_plot(
+    #     session_name,
+    #     condition_to_plot='atLever',
+    #     n_cells_total=20,
+    #     cells_to_display=[0, 2, 4],  # 1st, 3rd, 5th cells
+    #     output_path=output_file,
+    #     height_per_row=4
+    # )
+
+    # Example 3: Homing phase, cells 2, 4, 6 from top 15
+    # Uncomment to run:
+    # print("\n\nExample 3: Homing phase, cells 2, 4, 6 from top 15")
+    # output_file = f'{output_dir}/firing_rate_homing_246_{session_name}.pdf'
+    # fig = create_multi_cell_plot(
+    #     session_name,
+    #     condition_to_plot='homingFromLeavingLeverToPeriphery',
+    #     n_cells_total=15,
+    #     cells_to_display=[1, 3, 5],  # 2nd, 4th, 6th cells
+    #     output_path=output_file,
+    #     height_per_row=4
+    # )
 
     print("\n" + "="*80)
     print("COMPLETE!")
     print("="*80)
     print(f"\nFigure saved to: {output_file}")
+    print("\nTo generate other combinations, uncomment Example 2 or 3 above,")
+    print("or modify the parameters to your needs:")
+    print("\n  Parameters:")
+    print("  - condition_to_plot: 'searchToLeverPath', 'atLever', 'homingFromLeavingLeverToPeriphery'")
+    print("  - n_cells_total: Total number of top MVL cells for aggregate statistics (e.g., 10, 20, 50)")
+    print("  - cells_to_display: List of 3 indices [0-based] to display (e.g., [0,1,2] or [0,5,9])")
+    print("  - height_per_row: Height in inches per row (default: 4)")
+    print("\n  Figure Layout (3×3 grid):")
+    print("    Row 0: Trial matrices for 3 selected cells")
+    print("    Row 1: Correlation plots for 3 selected cells")
+    print("    Row 2: Aggregate histogram for ALL top N cells (spans full width)")
