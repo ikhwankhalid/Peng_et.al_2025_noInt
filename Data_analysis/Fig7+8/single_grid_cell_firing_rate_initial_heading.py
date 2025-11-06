@@ -184,7 +184,7 @@ def normalize_2d_array(arr):
 # INITIAL HEADING CALCULATION
 # ============================================================================
 
-def calculate_initial_heading(sessionSlice, time_window=1):
+def calculate_initial_heading(sessionSlice, time_window=0.5):
     """
     Calculate initial heading for each trial as average of first few seconds of search.
 
@@ -775,6 +775,161 @@ def plot_firing_rate_heatmap(ax, cellID, condition, trial_matrix_dict, res_df,
 
 
 # ============================================================================
+# AGGREGATE STATISTICS ACROSS SESSIONS
+# ============================================================================
+
+def compute_aggregate_statistics_all_sessions(session_list,
+                                              condition_to_plot,
+                                              pickle_dict_trial_matrix,
+                                              pickle_dict_stats,
+                                              gc_df,
+                                              res_df,
+                                              full_sessions_df,
+                                              max_cells_per_session=None):
+    """
+    Compute correlation statistics for all grid cells across multiple sessions.
+
+    Parameters:
+    -----------
+    session_list : list of str
+        List of session names to process (e.g., useAble from setup_project.py)
+    condition_to_plot : str
+        Behavioral phase to analyze ('searchToLeverPath', 'atLever', etc.)
+    pickle_dict_trial_matrix : dict
+        hdLeverCenteredTrialMatrix dictionary
+    pickle_dict_stats : dict
+        hdLeverCenteredLeftRightHeadingError dictionary
+    gc_df : DataFrame
+        Grid cell metadata (cells.csv)
+    res_df : DataFrame
+        Behavioral results dataframe
+    full_sessions_df : DataFrame
+        Full session data for initial heading calculation
+    max_cells_per_session : int, optional
+        Maximum cells to include per session (None = all grid cells)
+
+    Returns:
+    --------
+    DataFrame with columns: sessionName, cellID, cell_idx_in_session, realR, slope, sig, pValue
+    """
+    all_stats = []
+
+    print(f"\n{'='*80}")
+    print(f"Computing aggregate statistics across {len(session_list)} sessions")
+    print(f"Condition: {condition_to_plot}")
+    if max_cells_per_session:
+        print(f"Max cells per session: {max_cells_per_session}")
+    else:
+        print(f"Including all grid cells per session")
+    print(f"{'='*80}\n")
+
+    for session_idx, session_name in enumerate(session_list):
+        print(f"[{session_idx+1}/{len(session_list)}] Processing {session_name}...")
+
+        try:
+            # Select grid cells for this session
+            session_cells = select_top_cells_by_vector_length(
+                session_name,
+                pickle_dict_stats,
+                gc_df,
+                n=max_cells_per_session if max_cells_per_session else 1000  # Large number to get all
+            )
+
+            if len(session_cells) == 0:
+                print(f"  ⚠ No grid cells found, skipping")
+                continue
+
+            # Limit if requested
+            if max_cells_per_session:
+                session_cells = session_cells[:min(max_cells_per_session, len(session_cells))]
+
+            print(f"  Found {len(session_cells)} grid cells")
+
+            # Calculate initial heading for this session
+            session_slice = full_sessions_df[
+                full_sessions_df.session == session_name
+            ].reset_index()
+
+            if GLOBALSPEEDFILTER:
+                session_slice = session_slice[session_slice.speed > 10]
+
+            initial_heading_df = calculate_initial_heading(session_slice)
+
+            if len(initial_heading_df) == 0:
+                print(f"  ⚠ No initial heading data, skipping")
+                continue
+
+            print(f"  Calculated initial heading for {len(initial_heading_df)} trials")
+
+            # Process each cell
+            cells_processed = 0
+            for cell_idx, cell_id in enumerate(session_cells):
+                try:
+                    condition_full = f'{condition_to_plot}_dark'
+                    trial_df = extract_firing_rate_trial_matrix(
+                        cell_id, condition_full,
+                        pickle_dict_trial_matrix, res_df, initial_heading_df
+                    )
+
+                    if len(trial_df) == 0:
+                        continue
+
+                    peak_dirs = get_peak_firing_from_slice(
+                        trial_df, convolution=GLOBALCONV
+                    )
+
+                    if len(peak_dirs) == 0:
+                        continue
+
+                    trial_df_sorted = trial_df.sort_values(
+                        by='initialHeading', ascending=True
+                    )
+                    trial_df_sorted['peakFiringDir'] = peak_dirs
+
+                    xVal = trial_df_sorted['initialHeading'].values
+                    yVal = trial_df_sorted['peakFiringDir'].values
+                    realR, slope, _, sig, pValue = homing_angle_corr_stats(xVal, yVal)
+
+                    all_stats.append({
+                        'sessionName': session_name,
+                        'cellID': cell_id,
+                        'cell_idx_in_session': cell_idx,
+                        'realR': realR,
+                        'slope': slope,
+                        'sig': sig,
+                        'pValue': pValue
+                    })
+
+                    cells_processed += 1
+
+                except Exception as e:
+                    # Silently skip cells that fail
+                    continue
+
+            print(f"  ✓ Successfully processed {cells_processed}/{len(session_cells)} cells")
+
+        except Exception as e:
+            print(f"  ✗ Error processing session: {e}")
+            continue
+
+    if len(all_stats) == 0:
+        print("\n⚠ WARNING: No statistics computed across any session!")
+        return pd.DataFrame()
+
+    stats_df = pd.DataFrame(all_stats)
+
+    print(f"\n{'='*80}")
+    print(f"Aggregate Statistics Summary:")
+    print(f"  Total sessions processed: {stats_df['sessionName'].nunique()}")
+    print(f"  Total cells analyzed: {len(stats_df)}")
+    print(f"  Significant correlations: {stats_df['sig'].sum()} ({100*stats_df['sig'].mean():.1f}%)")
+    print(f"  Mean correlation: {stats_df['realR'].mean():.3f} ± {stats_df['realR'].std():.3f}")
+    print(f"{'='*80}\n")
+
+    return stats_df
+
+
+# ============================================================================
 # MAIN EXECUTION
 # ============================================================================
 
@@ -782,6 +937,8 @@ def create_multi_cell_plot(session_name,
                            condition_to_plot='searchToLeverPath',
                            n_cells_total=10,
                            cells_to_display=[0, 1, 2],
+                           aggregate_across_sessions=True,
+                           max_cells_per_session=None,
                            output_path=None,
                            height_per_row=4):
     """
@@ -796,15 +953,22 @@ def create_multi_cell_plot(session_name,
     Parameters:
     -----------
     session_name : str
-        Session name to analyze
+        Session name to analyze (used for Rows 0-1 display)
     condition_to_plot : str
         Behavioral phase to visualize (default: 'searchToLeverPath')
         Options: 'searchToLeverPath', 'atLever', 'homingFromLeavingLeverToPeriphery'
     n_cells_total : int
-        Total number of top MVL cells to include in aggregate statistics (default: 10)
+        Number of top MVL cells from session_name to select from (default: 10)
+        Used only for selecting cells_to_display
     cells_to_display : list of int
         Indices of 3 cells (from top N) to display in rows 0-1 (default: [0, 1, 2])
         Example: [0, 1, 2] = top 3 cells, [0, 5, 9] = 1st, 6th, 10th cells
+    aggregate_across_sessions : bool
+        If True, Row 2 aggregates across all useAble sessions (default: True)
+        If False, Row 2 shows only top N cells from session_name
+    max_cells_per_session : int, optional
+        When aggregate_across_sessions=True, limit cells per session (default: None = all)
+        Example: 20 = include top 20 MVL cells from each session
     output_path : str, optional
         Path to save figure
     height_per_row : float
@@ -952,83 +1116,136 @@ def create_multi_cell_plot(session_name,
             ax.set_xticks([])
             ax.set_yticks([])
 
-    # ===== ROW 2: AGGREGATE HISTOGRAM FOR ALL N_CELLS_TOTAL =====
-
-    print(f"\nRow 2: Computing aggregate statistics for top {n_cells_total} cells...")
-
-    # Calculate correlations for ALL top N cells (not just the 3 displayed)
-    all_cell_stats = []
-    for cell_idx in range(min(n_cells_total, len(top_cells))):
-        cell_id = top_cells[cell_idx]
-
-        try:
-            condition_full = f'{condition_to_plot}_dark'
-            trial_df = extract_firing_rate_trial_matrix(
-                cell_id, condition_full,
-                hdLeverCenteredTrialMatrix, res, initial_heading_df
-            )
-
-            if len(trial_df) == 0:
-                continue
-
-            peak_dirs = get_peak_firing_from_slice(trial_df, convolution=GLOBALCONV)
-
-            if len(peak_dirs) == 0:
-                continue
-
-            trial_df_sorted = trial_df.sort_values(by='initialHeading', ascending=True)
-            trial_df_sorted['peakFiringDir'] = peak_dirs
-
-            xVal = trial_df_sorted['initialHeading'].values
-            yVal = trial_df_sorted['peakFiringDir'].values
-            realR, slope, _, sig, pValue = homing_angle_corr_stats(xVal, yVal)
-
-            all_cell_stats.append({
-                'cellID': cell_id,
-                'cell_idx': cell_idx,
-                'realR': realR,
-                'slope': slope,
-                'sig': sig,
-                'pValue': pValue
-            })
-
-            if (cell_idx + 1) % 5 == 0:
-                print(f"  Processed {cell_idx + 1}/{min(n_cells_total, len(top_cells))} cells...")
-
-        except Exception as e:
-            print(f"    Warning: Could not process cell {cell_idx+1} ({cell_id}): {e}")
-            continue
-
-    print(f"  Successfully processed {len(all_cell_stats)}/{min(n_cells_total, len(top_cells))} cells")
+    # ===== ROW 2: AGGREGATE HISTOGRAM =====
 
     # Create subplot spanning all 3 columns
     ax_hist = fig.add_subplot(gs[2, :])  # Spans all columns in row 2
 
-    if len(all_cell_stats) > 0:
-        stats_df = pd.DataFrame(all_cell_stats)
+    if aggregate_across_sessions:
+        # Aggregate across all sessions in useAble list
+        print(f"\nRow 2: Computing aggregate statistics across ALL sessions in useAble list...")
 
-        plot_correlation_distribution(
-            ax_hist, stats_df,
-            xlabel='Peak-initial heading corr. (r)',
-            ylabel='Grid cells',
-            legend=True,
-            ylim=max(10, len(all_cell_stats) + 5),
-            title=f'Aggregate Statistics (Top {len(all_cell_stats)} Cells)',
-            set_ylabel=True
+        # Import useAble from setup_project
+        from setup_project import useAble
+
+        print(f"  Found {len(useAble)} sessions to process")
+        if max_cells_per_session is not None:
+            print(f"  Limiting to top {max_cells_per_session} cells per session")
+
+        all_cell_stats_df = compute_aggregate_statistics_all_sessions(
+            session_list=useAble,
+            condition_to_plot=condition_to_plot,
+            pickle_dict_trial_matrix=hdLeverCenteredTrialMatrix,
+            pickle_dict_stats=hdLeverCenteredLeftRightHeadingError,
+            gc_df=gc,
+            res_df=res,
+            full_sessions_df=full_all_sessions,
+            max_cells_per_session=max_cells_per_session
         )
+
+        stats_description = f"All Sessions ({len(useAble)} sessions, {len(all_cell_stats_df)} cells)"
+
+        if len(all_cell_stats_df) > 0:
+            plot_correlation_distribution(
+                ax_hist, all_cell_stats_df,
+                xlabel='Peak-initial heading corr. (r)',
+                ylabel='Grid cells',
+                legend=True,
+                ylim=max(10, len(all_cell_stats_df) // 5),  # Scale with cell count
+                title=f'Population Statistics: {len(all_cell_stats_df)} cells from {len(useAble)} sessions',
+                set_ylabel=True
+            )
+        else:
+            ax_hist.text(0.5, 0.5, 'No correlation data available',
+                        ha='center', va='center', transform=ax_hist.transAxes,
+                        fontsize=GLOBALFONTSIZE + 2)
+            ax_hist.set_xticks([])
+            ax_hist.set_yticks([])
+
     else:
-        ax_hist.text(0.5, 0.5, 'No correlation data available',
-                    ha='center', va='center', transform=ax_hist.transAxes,
-                    fontsize=GLOBALFONTSIZE + 2)
-        ax_hist.set_xticks([])
-        ax_hist.set_yticks([])
+        # Single-session aggregation (original behavior)
+        print(f"\nRow 2: Computing aggregate statistics for top {n_cells_total} cells from {session_name}...")
+
+        # Calculate correlations for ALL top N cells (not just the 3 displayed)
+        all_cell_stats = []
+        for cell_idx in range(min(n_cells_total, len(top_cells))):
+            cell_id = top_cells[cell_idx]
+
+            try:
+                condition_full = f'{condition_to_plot}_dark'
+                trial_df = extract_firing_rate_trial_matrix(
+                    cell_id, condition_full,
+                    hdLeverCenteredTrialMatrix, res, initial_heading_df
+                )
+
+                if len(trial_df) == 0:
+                    continue
+
+                peak_dirs = get_peak_firing_from_slice(trial_df, convolution=GLOBALCONV)
+
+                if len(peak_dirs) == 0:
+                    continue
+
+                trial_df_sorted = trial_df.sort_values(by='initialHeading', ascending=True)
+                trial_df_sorted['peakFiringDir'] = peak_dirs
+
+                xVal = trial_df_sorted['initialHeading'].values
+                yVal = trial_df_sorted['peakFiringDir'].values
+                realR, slope, _, sig, pValue = homing_angle_corr_stats(xVal, yVal)
+
+                all_cell_stats.append({
+                    'cellID': cell_id,
+                    'cell_idx': cell_idx,
+                    'realR': realR,
+                    'slope': slope,
+                    'sig': sig,
+                    'pValue': pValue
+                })
+
+                if (cell_idx + 1) % 5 == 0:
+                    print(f"  Processed {cell_idx + 1}/{min(n_cells_total, len(top_cells))} cells...")
+
+            except Exception as e:
+                print(f"    Warning: Could not process cell {cell_idx+1} ({cell_id}): {e}")
+                continue
+
+        print(f"  Successfully processed {len(all_cell_stats)}/{min(n_cells_total, len(top_cells))} cells")
+
+        stats_description = f"{session_name} ({len(all_cell_stats)} cells)"
+
+        if len(all_cell_stats) > 0:
+            stats_df = pd.DataFrame(all_cell_stats)
+
+            plot_correlation_distribution(
+                ax_hist, stats_df,
+                xlabel='Peak-initial heading corr. (r)',
+                ylabel='Grid cells',
+                legend=True,
+                ylim=max(10, len(all_cell_stats) + 5),
+                title=f'Aggregate Statistics (Top {len(all_cell_stats)} Cells)',
+                set_ylabel=True
+            )
+        else:
+            ax_hist.text(0.5, 0.5, 'No correlation data available',
+                        ha='center', va='center', transform=ax_hist.transAxes,
+                        fontsize=GLOBALFONTSIZE + 2)
+            ax_hist.set_xticks([])
+            ax_hist.set_yticks([])
 
     # Add overall title
-    fig.suptitle(
-        f'Grid Cell Firing Rates - {condition_label} Phase\n'
-        f'Session: {session_name} | Displaying cells {[i+1 for i in cells_to_display]} of top {n_cells_total}',
-        fontsize=GLOBALFONTSIZE + 4, y=0.995
-    )
+    if aggregate_across_sessions:
+        fig.suptitle(
+            f'Grid Cell Firing Rates - {condition_label} Phase\n'
+            f'Rows 0-1: Session {session_name} (cells {[i+1 for i in cells_to_display]} of top {n_cells_total}) | '
+            f'Row 2: Population statistics',
+            fontsize=GLOBALFONTSIZE + 4, y=0.995
+        )
+    else:
+        fig.suptitle(
+            f'Grid Cell Firing Rates - {condition_label} Phase\n'
+            f'Session: {session_name} | Displaying cells {[i+1 for i in cells_to_display]} of top {n_cells_total}',
+            fontsize=GLOBALFONTSIZE + 4, y=0.995
+        )
 
     plt.tight_layout()
 
@@ -1042,7 +1259,7 @@ def create_multi_cell_plot(session_name,
 
 
 if __name__ == "__main__":
-    # Example usage with new 3×3 layout
+    # Example usage with new 3×3 layout and cross-session aggregation
     session_name = 'jp486-24032023-0108'
 
     print("\n" + "="*80)
@@ -1053,35 +1270,56 @@ if __name__ == "__main__":
     output_dir = 'E:/GitHub/Peng_et.al_2025_noInt/Peng/Output'
     os.makedirs(output_dir, exist_ok=True)
 
-    # Example 1: Top 3 cells during search phase, aggregate stats from top 10
-    print("\n\nExample 1: Search phase, top 3 cells, aggregate from top 10")
-    output_file = f'{output_dir}/firing_rate_search_top3_{session_name}.pdf'
+    # Example 1: Population statistics across all sessions
+    # Rows 0-1: Show 3 cells from one session for visualization
+    # Row 2: Aggregate statistics from ALL sessions in useAble list
+    print("\n\nExample 1: Search phase with cross-session population statistics")
+    output_file = f'{output_dir}/firing_rate_search_population_{session_name}.pdf'
     fig = create_multi_cell_plot(
         session_name,
         condition_to_plot='searchToLeverPath',
-        n_cells_total=40,
-        cells_to_display=[1, 5, 6],
+        n_cells_total=10,  # Select from top 10 cells in session_name
+        cells_to_display=[1, 5, 6],  # Show top 3 cells in rows 0-1
+        aggregate_across_sessions=True,  # NEW: Aggregate across all sessions
+        max_cells_per_session=20,  # NEW: Use top 20 cells from each session
         output_path=output_file,
         height_per_row=4
     )
 
-    # Example 2: At lever phase, cells 1, 3, 5 from top 20
+    # Example 2: Single-session mode (original behavior)
+    # All statistics from one session only
     # Uncomment to run:
-    # print("\n\nExample 2: At lever phase, cells 1, 3, 5 from top 20")
-    # output_file = f'{output_dir}/firing_rate_lever_selected_{session_name}.pdf'
+    # print("\n\nExample 2: Single-session mode (no cross-session aggregation)")
+    # output_file = f'{output_dir}/firing_rate_search_single_{session_name}.pdf'
     # fig = create_multi_cell_plot(
     #     session_name,
-    #     condition_to_plot='atLever',
-    #     n_cells_total=20,
-    #     cells_to_display=[0, 2, 4],  # 1st, 3rd, 5th cells
+    #     condition_to_plot='searchToLeverPath',
+    #     n_cells_total=40,
+    #     cells_to_display=[0, 5, 9],
+    #     aggregate_across_sessions=False,  # Only this session
     #     output_path=output_file,
     #     height_per_row=4
     # )
 
-    # Example 3: Homing phase, cells 2, 4, 6 from top 15
+    # Example 3: At lever phase with population statistics
     # Uncomment to run:
-    # print("\n\nExample 3: Homing phase, cells 2, 4, 6 from top 15")
-    # output_file = f'{output_dir}/firing_rate_homing_246_{session_name}.pdf'
+    # print("\n\nExample 3: At lever phase with population statistics")
+    # output_file = f'{output_dir}/firing_rate_lever_population_{session_name}.pdf'
+    # fig = create_multi_cell_plot(
+    #     session_name,
+    #     condition_to_plot='atLever',
+    #     n_cells_total=20,
+    #     cells_to_display=[0, 2, 4],
+    #     aggregate_across_sessions=True,
+    #     max_cells_per_session=15,
+    #     output_path=output_file,
+    #     height_per_row=4
+    # )
+
+    # Example 4: Homing phase with population statistics
+    # Uncomment to run:
+    # print("\n\nExample 4: Homing phase with population statistics")
+    # output_file = f'{output_dir}/firing_rate_homing_population_{session_name}.pdf'
     # fig = create_multi_cell_plot(
     #     session_name,
     #     condition_to_plot='homingFromLeavingLeverToPeriphery',
