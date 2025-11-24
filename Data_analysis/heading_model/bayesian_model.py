@@ -80,10 +80,10 @@ class HeadingHierarchicalModel:
     def _prepare_vectorized_data(self):
         """
         Prepare vectorized data structures for efficient model computation.
-        
+
         Concatenates all trial observations into single arrays and creates
         index mappings for animal and trial parameters.
-        
+
         Returns
         -------
         vectorized_data : dict
@@ -91,6 +91,8 @@ class HeadingHierarchicalModel:
             - omega_all: Concatenated integrated angular velocity
             - t_all: Concatenated time arrays
             - theta_obs_all: Concatenated observed heading
+            - speed_all: Concatenated speed values
+            - mean_speed: Mean speed across all observations
             - animal_idx_all: Animal index for each observation
             - trial_idx_all: Trial index for each observation
             - n_obs: Total number of observations
@@ -98,38 +100,45 @@ class HeadingHierarchicalModel:
         omega_list = []
         t_list = []
         theta_obs_list = []
+        speed_list = []
         animal_idx_list = []
         trial_idx_list = []
-        
+
         for trial_idx in range(self.n_total_trials):
             animal_idx = self.trial_to_animal[trial_idx]
             trial_id = self.trial_to_id[trial_idx]
             animal = self.data['animals'][animal_idx]
-            
+
             # Get data for this trial
             Omega = self.data['omega_integrated'][animal][trial_id]
             t = self.data['time'][animal][trial_id]
             theta_obs = self.data['theta_obs'][animal][trial_id]
-            
+            speed = self.data['speed'][animal][trial_id]
+
             n_points = len(theta_obs)
-            
+
             # Append to lists
             omega_list.append(Omega)
             t_list.append(t)
             theta_obs_list.append(theta_obs)
+            speed_list.append(speed)
             animal_idx_list.append(np.full(n_points, animal_idx, dtype=int))
             trial_idx_list.append(np.full(n_points, trial_idx, dtype=int))
-        
+
         # Concatenate all arrays
+        speed_all = np.concatenate(speed_list)
+
         vectorized_data = {
             'omega_all': np.concatenate(omega_list),
             't_all': np.concatenate(t_list),
             'theta_obs_all': np.concatenate(theta_obs_list),
+            'speed_all': speed_all,
+            'mean_speed': np.mean(speed_all),
             'animal_idx_all': np.concatenate(animal_idx_list),
             'trial_idx_all': np.concatenate(trial_idx_list),
             'n_obs': sum(len(x) for x in theta_obs_list)
         }
-        
+
         return vectorized_data
 
     def build_model(self,
@@ -191,8 +200,17 @@ class HeadingHierarchicalModel:
             mu_theta0 = pm.Normal('mu_theta0', mu=0.0, sigma=np.pi)
             sigma_theta0 = pm.HalfCauchy('sigma_theta0', beta=theta0_prior_sd)
 
-            # Observation noise
-            sigma_obs = pm.HalfCauchy('sigma_obs', beta=obs_noise_beta)
+            # ============================================================
+            # OBSERVATION NOISE (SPEED-DEPENDENT)
+            # ============================================================
+
+            # Base observation noise (at reference speed)
+            sigma_base = pm.HalfCauchy('sigma_base', beta=obs_noise_beta)
+
+            # Speed-noise relationship parameter
+            # beta_speed > 0: noise decreases with speed
+            # beta_speed = 0: speed-independent noise (reverts to old model)
+            beta_speed = pm.HalfNormal('beta_speed', sigma=1.0)
 
             # ============================================================
             # ANIMAL-LEVEL PARAMETERS
@@ -252,17 +270,26 @@ class HeadingHierarchicalModel:
                 alpha[vdata['animal_idx_all']] * vdata['omega_all'] +
                 gamma[vdata['trial_idx_all']] * vdata['t_all']
             )
-            
+
             # Wrap predictions to [-π, π] to respect circular nature
             import pytensor.tensor as pt
-            theta_pred = pt.arctan2(pt.sin(theta_pred_unwrapped), 
+            theta_pred = pt.arctan2(pt.sin(theta_pred_unwrapped),
                                     pt.cos(theta_pred_unwrapped))
+
+            # Speed-dependent observation noise
+            # sigma_obs(speed) = sigma_base * exp(-beta_speed * speed_normalized)
+            # At low speed: sigma_obs is large (high uncertainty)
+            # At high speed: sigma_obs is small (low uncertainty)
+            # Clip speeds to minimum threshold (0.5 cm/s) to avoid numerical issues
+            speed_clipped = pt.maximum(vdata['speed_all'], 0.5)  # Minimum 0.5 cm/s
+            speed_normalized = speed_clipped / vdata['mean_speed']
+            sigma_obs = sigma_base * pt.exp(-beta_speed * speed_normalized)
 
             # Use von Mises distribution for circular data
             # von Mises is the circular analog of the Normal distribution
             # Convert sigma to kappa (concentration parameter): kappa ≈ 1/sigma²
-            kappa = 1.0 / (sigma_obs ** 2)
-            
+            kappa = 1.0 / (sigma_obs ** 2 + 1e-6)  # Add small constant for stability
+
             pm.VonMises('theta_obs_all',
                         mu=theta_pred,
                         kappa=kappa,
@@ -347,7 +374,7 @@ class HeadingHierarchicalModel:
             var_names = ['mu_alpha', 'sigma_alpha',
                         'mu_gamma', 'sigma_gamma',
                         'mu_theta0', 'sigma_theta0',
-                        'sigma_obs']
+                        'sigma_base', 'beta_speed']
             # Add first few alphas
             n_alpha_check = min(5, self.data['n_animals'])
             var_names += [f'alpha' for _ in range(n_alpha_check)]
@@ -441,7 +468,7 @@ class HeadingHierarchicalModel:
 
         # Extract population-level parameters
         for param in ['mu_alpha', 'sigma_alpha', 'mu_gamma', 'sigma_gamma',
-                     'mu_theta0', 'sigma_theta0', 'sigma_obs']:
+                     'mu_theta0', 'sigma_theta0', 'sigma_base', 'beta_speed']:
             if param in summary.index:
                 lower_col = f'hdi_{(1-hdi_prob)/2*100:.1f}%'
                 upper_col = f'hdi_{(1 - (1-hdi_prob)/2)*100:.1f}%'

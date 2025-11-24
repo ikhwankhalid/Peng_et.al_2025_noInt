@@ -47,6 +47,7 @@ def load_and_filter_data(
     conditions: Optional[List[str]] = None,
     sessions: Optional[List[str]] = None,
     min_speed: float = 2.0,
+    filter_mode: str = 'none',
     project_data_path: str = DEFAULT_PROJECT_DATA_PATH,
     max_nan_fraction: float = 0.2,
     verbose: bool = True
@@ -64,7 +65,12 @@ def load_and_filter_data(
     sessions : list of str, optional
         Session names to include. If None, uses DEFAULT_USEABLE_SESSIONS.
     min_speed : float, default=2.0
-        Minimum speed threshold (cm/s) for including data points.
+        Minimum speed threshold (cm/s). Interpretation depends on filter_mode.
+    filter_mode : str, default='none'
+        How to handle low-speed data:
+        - 'none': Keep all data points (recommended for continuous model)
+        - 'remove': Remove data points below min_speed (old behavior)
+        - 'weight': Keep all data, add speed_weight column (future option)
     project_data_path : str
         Path to project data directory containing results folder.
     max_nan_fraction : float, default=0.2
@@ -109,11 +115,23 @@ def load_and_filter_data(
         if verbose:
             print(f"After condition filter: {len(df):,} rows")
 
-    # Filter by speed
-    df = df[df.speed >= min_speed].copy()
-
-    if verbose:
-        print(f"After speed filter (>={min_speed} cm/s): {len(df):,} rows")
+    # Handle speed filtering based on filter_mode
+    if filter_mode == 'remove':
+        # Old behavior: remove low-speed data points
+        df = df[df.speed >= min_speed].copy()
+        if verbose:
+            print(f"After speed filter (>={min_speed} cm/s): {len(df):,} rows")
+    elif filter_mode == 'weight':
+        # Add speed weight column but keep all data
+        df['speed_weight'] = np.clip(df['speed'] / min_speed, 0.0, 1.0)
+        if verbose:
+            print(f"Speed weighting enabled (threshold={min_speed} cm/s)")
+    elif filter_mode == 'none':
+        # Keep all data without modification
+        if verbose:
+            print(f"No speed filtering applied (keeping all {len(df):,} rows)")
+    else:
+        raise ValueError(f"Invalid filter_mode: {filter_mode}. Must be 'none', 'remove', or 'weight'.")
 
     # Check for required columns
     required_cols = ['mouse', 'session', 'trial', 'recTime', 'x', 'y', 'px', 'py', 'speed']
@@ -328,11 +346,13 @@ def process_trial_data(
     trial_data : dict
         Dictionary with keys:
         - 'recTime': Time array
+        - 't': Relative time (from 0)
         - 'true_heading': True heading from (x, y)
         - 'decoded_heading': Decoded heading from (px, py)
         - 'omega': Angular velocity
         - 'Omega': Integrated angular velocity
         - 'theta_obs': Observed decoded heading (for model)
+        - 'speed': Speed array (cm/s)
         - 'valid_mask': Boolean mask of valid (non-NaN) data points
     """
     # Sort by time
@@ -344,6 +364,7 @@ def process_trial_data(
     y = trial_df['y'].values
     px = trial_df['px'].values
     py = trial_df['py'].values
+    speed = trial_df['speed'].values
 
     # Calculate true heading
     true_heading = calculate_true_heading(x, y)
@@ -371,6 +392,7 @@ def process_trial_data(
         'omega': omega,
         'Omega': Omega,
         'theta_obs': decoded_heading,  # This is what we're modeling
+        'speed': speed,
         'valid_mask': valid_mask
     }
 
@@ -410,6 +432,7 @@ def structure_hierarchical_data(
         - 'omega_integrated': Dict[animal][trial] → Ω(t) array
         - 'time': Dict[animal][trial] → t array
         - 'theta_obs': Dict[animal][trial] → θ̂_obs array
+        - 'speed': Dict[animal][trial] → speed array
         - 'trial_lengths': Dict[animal][trial] → number of timepoints
         - 'trial_info': Dict with metadata
     """
@@ -431,6 +454,7 @@ def structure_hierarchical_data(
     omega_integrated = {}
     time = {}
     theta_obs = {}
+    speed = {}
     trial_lengths = {}
     trial_info = {}
 
@@ -448,6 +472,7 @@ def structure_hierarchical_data(
         omega_integrated[animal] = {}
         time[animal] = {}
         theta_obs[animal] = {}
+        speed[animal] = {}
         trial_lengths[animal] = {}
         trial_info[animal] = {}
 
@@ -474,6 +499,7 @@ def structure_hierarchical_data(
             omega_integrated[animal][trial_id] = trial_data['Omega'][valid_mask]
             time[animal][trial_id] = trial_data['t'][valid_mask]
             theta_obs[animal][trial_id] = trial_data['theta_obs'][valid_mask]
+            speed[animal][trial_id] = trial_data['speed'][valid_mask]
             trial_lengths[animal][trial_id] = n_valid
 
             # Store metadata
@@ -505,6 +531,7 @@ def structure_hierarchical_data(
         'omega_integrated': {a: omega_integrated[a] for a in animals_with_data},
         'time': {a: time[a] for a in animals_with_data},
         'theta_obs': {a: theta_obs[a] for a in animals_with_data},
+        'speed': {a: speed[a] for a in animals_with_data},
         'trial_lengths': {a: trial_lengths[a] for a in animals_with_data},
         'trial_info': {a: trial_info[a] for a in animals_with_data}
     }
