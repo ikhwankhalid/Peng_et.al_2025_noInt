@@ -59,9 +59,9 @@ useAble = ['jp486-19032023-0108', 'jp486-18032023-0108',
        'jp452-23112022-0108', 'jp1686-26042022-0108']
 
 # Analysis parameters
-SPEED_THRESHOLDS = [1.0, 2.0]  # cm/s
-MIN_BOUT_LENGTH = 10  # timepoints (~1 second at 20 Hz)
-SMOOTH_WINDOW = 1.0  # for angular velocity smoothing
+SPEED_THRESHOLDS = [0.5, 1.0, 2.0, 10.0]  # cm/s
+MIN_BOUT_LENGTH = 5  # timepoints (~1 second at 20 Hz)
+SMOOTH_WINDOW = 0.5  # for angular velocity smoothing
 MAX_INTEGRATED_THRESHOLD = np.pi  # Set to π, 2π, etc. to enable bout truncation at threshold (radians)
 
 # Conditions to analyze
@@ -477,6 +477,98 @@ def regression_by_turn_direction(data, condition_name, speed_threshold):
     return results
 
 
+def signed_regression_analysis(data, condition_name, speed_threshold):
+    """
+    Perform signed regression analysis between integrated angular velocity
+    and heading deviation without splitting by direction.
+
+    This directly tests the hypothesis: Does signed cumulative turning
+    predict signed heading deviation? (Expected: negative correlation if
+    animals overestimate turns and compensate in opposite direction)
+
+    Parameters
+    ----------
+    data : DataFrame
+        Processed bout data with integrated_ang_vel and mvtDirError columns
+    condition_name : str
+        Name of condition (for results table)
+    speed_threshold : float
+        Speed threshold used (for results table)
+
+    Returns
+    -------
+    results : dict
+        Regression statistics for signed relationship
+    """
+    results = {
+        'condition': condition_name,
+        'speed_threshold': speed_threshold,
+        'n_total': len(data),
+        'n_bouts': data['bout_id'].nunique() if 'bout_id' in data.columns else 0
+    }
+
+    # Get signed values (no splitting by direction)
+    X = data['integrated_ang_vel'].values
+    Y = data['mvtDirError'].values
+
+    # Remove NaN
+    valid = ~(np.isnan(X) | np.isnan(Y))
+    X = X[valid]
+    Y = Y[valid]
+
+    if len(X) > 10:
+        # Simple linear regression
+        slope, intercept, r, p, se = stats.linregress(X, Y)
+
+        results['beta_signed'] = slope
+        results['intercept_signed'] = intercept
+        results['r_signed'] = r
+        results['r_squared_signed'] = r**2
+        results['p_signed'] = p
+        results['se_signed'] = se
+
+        # Compute standardized beta for effect size
+        if np.std(X) > 0 and np.std(Y) > 0:
+            beta_standardized = slope * (np.std(X) / np.std(Y))
+            results['beta_standardized'] = beta_standardized
+        else:
+            results['beta_standardized'] = np.nan
+
+        # 95% confidence interval for slope
+        from scipy.stats import t as t_dist
+        df = len(X) - 2
+        t_crit = t_dist.ppf(0.975, df)
+        ci_lower = slope - t_crit * se
+        ci_upper = slope + t_crit * se
+        results['ci_lower_95'] = ci_lower
+        results['ci_upper_95'] = ci_upper
+
+        # Mean and range of predictor and outcome
+        results['integrated_ang_vel_mean'] = np.mean(X)
+        results['integrated_ang_vel_std'] = np.std(X)
+        results['integrated_ang_vel_range'] = (np.min(X), np.max(X))
+        results['mvtDirError_mean'] = np.mean(Y)
+        results['mvtDirError_std'] = np.std(Y)
+
+    else:
+        results['beta_signed'] = np.nan
+        results['intercept_signed'] = np.nan
+        results['r_signed'] = np.nan
+        results['r_squared_signed'] = np.nan
+        results['p_signed'] = np.nan
+        results['se_signed'] = np.nan
+        results['beta_standardized'] = np.nan
+        results['ci_lower_95'] = np.nan
+        results['ci_upper_95'] = np.nan
+        results['integrated_ang_vel_mean'] = np.nan
+        results['integrated_ang_vel_std'] = np.nan
+        results['integrated_ang_vel_range'] = (np.nan, np.nan)
+        results['mvtDirError_mean'] = np.nan
+        results['mvtDirError_std'] = np.nan
+
+    return results
+
+
 # =============================================================================
 # ACCUMULATION ANALYSIS
 # =============================================================================
@@ -685,8 +777,14 @@ def process_all_conditions(df, conditions, speed_thresholds, min_bout_length=20,
                 print(f"    Left timepoints: {(combined['turn_direction'] == 'left').sum()}")
                 print(f"    Right timepoints: {(combined['turn_direction'] == 'right').sum()}")
 
-                # Regression analysis
-                reg_results = regression_by_turn_direction(combined, condition, speed_threshold)
+                # OLD APPROACH: Regression by turn direction (tests asymmetry)
+                reg_results_old = regression_by_turn_direction(combined, condition, speed_threshold)
+
+                # NEW APPROACH: Signed regression (tests signed relationship)
+                reg_results_signed = signed_regression_analysis(combined, condition, speed_threshold)
+
+                # Merge both results for comparison
+                reg_results = {**reg_results_old, **reg_results_signed}
 
                 # Accumulation test
                 accum_results = test_bout_accumulation(combined)
@@ -694,9 +792,14 @@ def process_all_conditions(df, conditions, speed_thresholds, min_bout_length=20,
 
                 regression_results.append(reg_results)
 
-                print(f"    beta_left: {reg_results['beta_left']:.6f}, p={reg_results['p_left']:.4f}")
-                print(f"    beta_right: {reg_results['beta_right']:.6f}, p={reg_results['p_right']:.4f}")
-                print(f"    Asymmetry: beta_diff={reg_results['beta_diff']:.6f}, p={reg_results['p_asymmetry']:.4f}")
+                # Print comparison
+                print(f"    OLD APPROACH (split by direction):")
+                print(f"      beta_left: {reg_results['beta_left']:.6f}, p={reg_results['p_left']:.4f}")
+                print(f"      beta_right: {reg_results['beta_right']:.6f}, p={reg_results['p_right']:.4f}")
+                print(f"      Asymmetry: beta_diff={reg_results['beta_diff']:.6f}, p={reg_results['p_asymmetry']:.4f}")
+                print(f"    NEW APPROACH (signed regression):")
+                print(f"      beta_signed: {reg_results['beta_signed']:.6f}, p={reg_results['p_signed']:.4f}")
+                print(f"      R²={reg_results['r_squared_signed']:.4f}, 95% CI=[{reg_results['ci_lower_95']:.6f}, {reg_results['ci_upper_95']:.6f}]")
 
     # Combine results
     if len(all_bout_data) > 0:
@@ -777,19 +880,59 @@ if __name__ == "__main__":
     print("="*80)
 
     if len(regression_results) > 0:
-        print("\nRegression Results Summary:")
-        print(regression_results[['condition', 'speed_threshold', 'beta_left', 'beta_right',
-                                  'beta_diff', 'p_asymmetry']].to_string(index=False))
+        print("\n" + "="*80)
+        print("PRIMARY ANALYSIS: SIGNED REGRESSION")
+        print("="*80)
+        print("\nDirect test of hypothesis: Does signed cumulative turning predict signed heading deviation?")
+        print("Expected: β < 0 (accumulated left turns → rightward heading error)\n")
+
+        # Show signed regression results
+        signed_cols = ['condition', 'speed_threshold', 'beta_signed', 'r_squared_signed',
+                      'p_signed', 'ci_lower_95', 'ci_upper_95']
+        available_cols = [col for col in signed_cols if col in regression_results.columns]
+        print(regression_results[available_cols].to_string(index=False))
+
+        # Count significant signed relationships
+        sig_signed = (regression_results['p_signed'] < 0.05).sum()
+        total_signed = len(regression_results[~regression_results['p_signed'].isna()])
+        print(f"\nSignificant signed relationships (p < 0.05): {sig_signed}/{total_signed}")
+
+        # Count negative betas (expected direction)
+        negative_betas = (regression_results['beta_signed'] < 0).sum()
+        print(f"Negative β (expected direction): {negative_betas}/{total_signed}")
+
+        print("\n" + "="*80)
+        print("COMPARISON: OLD APPROACH (Split by Direction)")
+        print("="*80)
+        print("\nNote: Old approach tests asymmetry (β_left ≠ β_right), not signed relationship")
+        print("      A negative signed relationship appears as β_left < 0 AND β_right > 0\n")
+
+        old_cols = ['condition', 'speed_threshold', 'beta_left', 'beta_right',
+                   'beta_diff', 'p_asymmetry']
+        available_old_cols = [col for col in old_cols if col in regression_results.columns]
+        print(regression_results[available_old_cols].to_string(index=False))
 
         # Count significant asymmetries
         sig_asymmetries = (regression_results['p_asymmetry'] < 0.05).sum()
-        total_tests = len(regression_results[~regression_results['p_asymmetry'].isna()])
-        print(f"\nSignificant asymmetries (p < 0.05): {sig_asymmetries}/{total_tests}")
+        total_asymmetry = len(regression_results[~regression_results['p_asymmetry'].isna()])
+        print(f"\nSignificant asymmetries (p < 0.05): {sig_asymmetries}/{total_asymmetry}")
+
+        print("\n" + "="*80)
+        print("INTERPRETATION GUIDE")
+        print("="*80)
+        print("Signed Regression (PRIMARY):")
+        print("  β < 0: Accumulated left turns → rightward heading error (overestimation)")
+        print("  β > 0: Accumulated left turns → leftward heading error (underestimation)")
+        print("  β ≈ 0: No systematic relationship between cumulative turns and heading error")
+        print("\nOld Approach (COMPARISON ONLY):")
+        print("  Shows β_left < 0 AND β_right > 0 when there's a negative signed relationship")
+        print("  This is NOT asymmetry - it's one consistent relationship!")
 
     print("\n" + "="*80)
     print("ANALYSIS COMPLETE")
     print("="*80)
     print(f"\nNext steps:")
-    print(f"  1. Review: {reg_results_fn}")
-    print(f"  2. Run visualization script (to be created)")
-    print(f"  3. Implement shuffle controls")
+    print(f"  1. Review primary results: signed regression β and p-values")
+    print(f"  2. Run visualization script: integrated_angular_velocity_visualizations.py")
+    print(f"  3. If significant effects found, add controls (speed, phase, distance)")
+    print(f"  4. Consider hierarchical models to account for session/trial clustering")
