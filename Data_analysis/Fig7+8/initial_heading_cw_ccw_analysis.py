@@ -96,6 +96,30 @@ OUTPUT_DIR = os.path.join(PROJECT_DATA_PATH, 'results', 'initial_heading_cwccw')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(os.path.join(OUTPUT_DIR, 'figures'), exist_ok=True)
 
+# Output directory for wrapped analysis
+OUTPUT_DIR_WRAPPED = os.path.join(PROJECT_DATA_PATH, 'results', 'initial_heading_cwccw_wrapped')
+os.makedirs(OUTPUT_DIR_WRAPPED, exist_ok=True)
+os.makedirs(os.path.join(OUTPUT_DIR_WRAPPED, 'figures'), exist_ok=True)
+
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+def wrap_to_pi(angle):
+    """
+    Wrap angle to [-pi, pi] range.
+
+    Args:
+        angle: Angle in radians (can be any value)
+
+    Returns:
+        Angle wrapped to [-pi, pi] range, or np.nan if input is nan
+    """
+    if np.isnan(angle):
+        return np.nan
+    return math.remainder(angle, 2 * np.pi)
+
 # ============================================================================
 # DATA LOADING FUNCTIONS
 # ============================================================================
@@ -991,7 +1015,11 @@ def compile_trial_data(behavior_df, all_session_df=None, use_hdpose=False):
                 'heading_hdpose': heading_hd,
                 'cwccw_trial_end': cwccw_end,
                 'cwccw_lever_arrival': cwccw_lever,
-                'cwccw_at_lever': cwccw_atlever
+                'cwccw_at_lever': cwccw_atlever,
+                # Wrapped versions (to [-pi, pi] range)
+                'cwccw_trial_end_wrapped': wrap_to_pi(cwccw_end),
+                'cwccw_lever_arrival_wrapped': wrap_to_pi(cwccw_lever),
+                'cwccw_at_lever_wrapped': wrap_to_pi(cwccw_atlever)
             })
 
     trial_df = pd.DataFrame(all_trials)
@@ -1033,6 +1061,7 @@ def run_analysis_pipeline(save_figures=True, use_hdpose=True, verbose=True):
 
     # Define analysis configurations
     metrics = ['cwccw_trial_end', 'cwccw_lever_arrival', 'cwccw_at_lever']
+    metrics_wrapped = ['cwccw_trial_end_wrapped', 'cwccw_lever_arrival_wrapped', 'cwccw_at_lever_wrapped']
     methods = ['heading_movement']
     if use_hdpose:
         methods.append('heading_hdpose')
@@ -1109,7 +1138,7 @@ def run_analysis_pipeline(save_figures=True, use_hdpose=True, verbose=True):
 
     # Print summary
     print("\n" + "=" * 80)
-    print("SUMMARY")
+    print("SUMMARY (UNWRAPPED)")
     print("=" * 80)
     print(f"Total tests: {len(results_df)}")
     print(f"Significant after FDR correction: {results_df['significant'].sum()}")
@@ -1117,10 +1146,130 @@ def run_analysis_pipeline(save_figures=True, use_hdpose=True, verbose=True):
 
     # Create figures
     if save_figures:
-        print("\nGenerating figures...")
+        print("\nGenerating figures (unwrapped)...")
         create_summary_figures(trial_df, results_df, behavior_df)
 
-    return results_df
+    # =========================================================================
+    # WRAPPED ANALYSIS (angles wrapped to [-pi, pi])
+    # =========================================================================
+    print("\n" + "=" * 80)
+    print("WRAPPED ANALYSIS (angles wrapped to [-pi, +pi])")
+    print("=" * 80)
+
+    # Save wrapped trial data
+    trial_df.to_csv(os.path.join(OUTPUT_DIR_WRAPPED, 'trial_data_wrapped.csv'), index=False)
+    print(f"\nWrapped trial data saved to {OUTPUT_DIR_WRAPPED}/trial_data_wrapped.csv")
+
+    # Run wrapped analyses
+    all_results_wrapped = []
+
+    print("\n" + "-" * 80)
+    print("Running statistical analyses (wrapped)...")
+    print("-" * 80)
+
+    for metric in metrics_wrapped:
+        for method in methods:
+            for cond_name, cond_df in conditions.items():
+                if len(cond_df) < 10:
+                    continue
+
+                heading = cond_df[method].values
+                cwccw = cond_df[metric].values
+
+                # Circular-linear correlation
+                corr_stats = circular_linear_correlation_permutation(heading, cwccw)
+
+                # Logistic regression
+                logit_stats = logistic_regression_cwccw(heading, cwccw)
+
+                result = {
+                    'metric': metric,
+                    'heading_method': method,
+                    'condition': cond_name,
+                    'n_trials': corr_stats['n'],
+                    'r': corr_stats['r'],
+                    'r_ci_lower': corr_stats['ci_lower'],
+                    'r_ci_upper': corr_stats['ci_upper'],
+                    'p_uncorr': corr_stats['p_value'],
+                    'odds_ratio': logit_stats['odds_ratio'],
+                    'or_ci_lower': logit_stats['or_ci_lower'],
+                    'or_ci_upper': logit_stats['or_ci_upper'],
+                    'or_p': logit_stats['p_value'],
+                    'auc': logit_stats['auc'],
+                    'n_cw': logit_stats['n_cw'],
+                    'n_ccw': logit_stats['n_ccw']
+                }
+                all_results_wrapped.append(result)
+
+                if verbose:
+                    print(f"  {metric} | {method} | {cond_name}: r={corr_stats['r']:.3f}, p={corr_stats['p_value']:.4f}")
+
+    results_df_wrapped = pd.DataFrame(all_results_wrapped)
+
+    # Apply FDR correction
+    p_values_wrapped = results_df_wrapped['p_uncorr'].values
+    p_fdr_wrapped, significant_wrapped = apply_fdr_correction(p_values_wrapped)
+    results_df_wrapped['p_fdr'] = p_fdr_wrapped
+    results_df_wrapped['significant'] = significant_wrapped
+
+    # Save wrapped results
+    results_df_wrapped.to_csv(os.path.join(OUTPUT_DIR_WRAPPED, 'summary_statistics_wrapped.csv'), index=False)
+    print(f"\nWrapped results saved to {OUTPUT_DIR_WRAPPED}/summary_statistics_wrapped.csv")
+
+    # Print wrapped summary
+    print("\n" + "=" * 80)
+    print("SUMMARY (WRAPPED)")
+    print("=" * 80)
+    print(f"Total tests: {len(results_df_wrapped)}")
+    print(f"Significant after FDR correction: {results_df_wrapped['significant'].sum()}")
+    print(f"\nMean correlation (dark trials): {results_df_wrapped[results_df_wrapped['condition'] == 'all_dark']['r'].mean():.3f}")
+
+    # Create wrapped figures
+    if save_figures:
+        print("\nGenerating figures (wrapped)...")
+        create_summary_figures_wrapped(trial_df, results_df_wrapped, behavior_df)
+
+    # =========================================================================
+    # COMPARISON: UNWRAPPED vs WRAPPED
+    # =========================================================================
+    print("\n" + "=" * 80)
+    print("COMPARISON: UNWRAPPED vs WRAPPED")
+    print("=" * 80)
+
+    # Compare key metrics for dark trials with movement method
+    for metric, metric_wrapped in zip(metrics, metrics_wrapped):
+        unwrapped_row = results_df[
+            (results_df['metric'] == metric) &
+            (results_df['heading_method'] == 'heading_movement') &
+            (results_df['condition'] == 'all_dark')
+        ]
+        wrapped_row = results_df_wrapped[
+            (results_df_wrapped['metric'] == metric_wrapped) &
+            (results_df_wrapped['heading_method'] == 'heading_movement') &
+            (results_df_wrapped['condition'] == 'all_dark')
+        ]
+
+        if len(unwrapped_row) > 0 and len(wrapped_row) > 0:
+            r_unwrapped = unwrapped_row['r'].values[0]
+            r_wrapped = wrapped_row['r'].values[0]
+            p_unwrapped = unwrapped_row['p_uncorr'].values[0]
+            p_wrapped = wrapped_row['p_uncorr'].values[0]
+
+            # Determine if relationship is stronger/weaker
+            if abs(r_wrapped) > abs(r_unwrapped):
+                change = "STRONGER"
+            elif abs(r_wrapped) < abs(r_unwrapped):
+                change = "WEAKER"
+            else:
+                change = "SAME"
+
+            metric_short = metric.replace('cwccw_', '')
+            print(f"\n{metric_short}:")
+            print(f"  Unwrapped: r = {r_unwrapped:.4f}, p = {p_unwrapped:.4f}")
+            print(f"  Wrapped:   r = {r_wrapped:.4f}, p = {p_wrapped:.4f}")
+            print(f"  Change:    {change} (delta_r = {r_wrapped - r_unwrapped:+.4f})")
+
+    return results_df, results_df_wrapped
 
 
 def extract_stats_for_plotting(results_df, metric, heading_method, condition):
@@ -1263,13 +1412,138 @@ def create_summary_figures(trial_df, results_df, behavior_df):
     print(f"Figures saved to {OUTPUT_DIR}/figures/")
 
 
+def create_summary_figures_wrapped(trial_df, results_df_wrapped, behavior_df):
+    """Create publication-quality summary figures for WRAPPED analysis."""
+
+    # Figure 1: Main scatter plots for dark trials (WRAPPED)
+    fig, axes = plt.subplots(2, 3, figsize=(14, 9))
+
+    dark_df = trial_df[trial_df['light'] == 'dark']
+
+    metrics_wrapped = ['cwccw_trial_end_wrapped', 'cwccw_lever_arrival_wrapped', 'cwccw_at_lever_wrapped']
+    metric_labels = ['Trial End', 'Lever Arrival', 'At Lever']
+
+    for col, (metric, label) in enumerate(zip(metrics_wrapped, metric_labels)):
+        # Movement method
+        stats = extract_stats_for_plotting(results_df_wrapped, metric, 'heading_movement', 'all_dark')
+
+        # Add significance marker to title
+        sig_marker = ''
+        if stats and stats.get('significant', False):
+            p_fdr = stats.get('p_fdr', 1)
+            if p_fdr < 0.001:
+                sig_marker = ' ***'
+            elif p_fdr < 0.01:
+                sig_marker = ' **'
+            elif p_fdr < 0.05:
+                sig_marker = ' *'
+
+        plot_scatter_with_regression(
+            axes[0, col],
+            dark_df['heading_movement'].values,
+            dark_df[metric].values,
+            stats,
+            title=f'{label}{sig_marker}\n(Movement Direction)',
+            ylabel='CW (+) / CCW (-) rad [wrapped ±π]' if col == 0 else ''
+        )
+
+        # hdPose method (if available)
+        if 'heading_hdpose' in dark_df.columns and not dark_df['heading_hdpose'].isna().all():
+            stats = extract_stats_for_plotting(results_df_wrapped, metric, 'heading_hdpose', 'all_dark')
+
+            sig_marker = ''
+            if stats and stats.get('significant', False):
+                p_fdr = stats.get('p_fdr', 1)
+                if p_fdr < 0.001:
+                    sig_marker = ' ***'
+                elif p_fdr < 0.01:
+                    sig_marker = ' **'
+                elif p_fdr < 0.05:
+                    sig_marker = ' *'
+
+            plot_scatter_with_regression(
+                axes[1, col],
+                dark_df['heading_hdpose'].values,
+                dark_df[metric].values,
+                stats,
+                title=f'{label}{sig_marker}\n(Head Direction)',
+                ylabel='CW (+) / CCW (-) rad [wrapped ±π]' if col == 0 else ''
+            )
+        else:
+            axes[1, col].text(0.5, 0.5, 'hdPose not computed',
+                             ha='center', va='center', transform=axes[1, col].transAxes)
+            axes[1, col].set_xticks([])
+            axes[1, col].set_yticks([])
+
+    # Add figure legend/annotation
+    fig.text(0.5, 0.01,
+             'Orange line: circular-linear regression | CW/CCW: angular displacement WRAPPED to [-π, +π]\n'
+             '* p<0.05, ** p<0.01, *** p<0.001 (FDR corrected)',
+             ha='center', fontsize=10, style='italic')
+
+    plt.suptitle('Initial Heading vs CW/CCW Movement Around Lever (Dark Trials)\n[Wrapped to ±π]', fontsize=14, y=0.98)
+    plt.tight_layout(rect=[0, 0.05, 1, 0.95])
+    plt.savefig(os.path.join(OUTPUT_DIR_WRAPPED, 'figures', 'fig1_scatter_dark_trials_wrapped.pdf'),
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Figure 2: Condition comparisons (forest plot) - WRAPPED
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    # Filter for movement method, trial_end_wrapped metric
+    subset = results_df_wrapped[
+        (results_df_wrapped['heading_method'] == 'heading_movement') &
+        (results_df_wrapped['metric'] == 'cwccw_trial_end_wrapped')
+    ].copy()
+
+    if len(subset) > 0:
+        plot_forest_effect_sizes(ax, subset, effect_column='r',
+                                 ci_lower_col='r_ci_lower', ci_upper_col='r_ci_upper',
+                                 label_column='condition')
+        ax.set_title('Effect Sizes: Initial Heading vs CW/CCW (Trial End)\n[Wrapped to ±π]', fontsize=12)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR_WRAPPED, 'figures', 'fig2_forest_plot_wrapped.pdf'),
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Figure 3: Polar distributions (WRAPPED)
+    fig, axes = plt.subplots(1, 3, figsize=(14, 5), subplot_kw={'projection': 'polar'})
+
+    dark_df = trial_df[trial_df['light'] == 'dark']
+
+    plot_polar_histogram(axes[0], dark_df['heading_movement'].values,
+                        title='All Dark Trials\n(Combined)', color='steelblue')
+
+    # Use wrapped metric for CW/CCW split
+    cw_mask = dark_df['cwccw_trial_end_wrapped'] > 0
+    plot_polar_histogram(axes[1], dark_df.loc[cw_mask, 'heading_movement'].values,
+                        title='Clockwise (CW) Trials\n(wrapped angle > 0)', color=COLORS['cw'])
+
+    ccw_mask = dark_df['cwccw_trial_end_wrapped'] <= 0
+    plot_polar_histogram(axes[2], dark_df.loc[ccw_mask, 'heading_movement'].values,
+                        title='Counter-Clockwise (CCW) Trials\n(wrapped angle ≤ 0)', color=COLORS['ccw'])
+
+    # Main title with explanation
+    fig.suptitle('Initial Heading Direction When Leaving Home\n'
+                 '(Movement direction in first 0.5s of search, dark trials only)\n'
+                 'CW/CCW based on WRAPPED angle | Red arrow = mean direction, length ∝ MVL',
+                 fontsize=12, y=1.08)
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR_WRAPPED, 'figures', 'fig3_polar_distributions_wrapped.pdf'),
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"Wrapped figures saved to {OUTPUT_DIR_WRAPPED}/figures/")
+
+
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
 
 if __name__ == "__main__":
     # Run the analysis pipeline
-    results_df = run_analysis_pipeline(
+    results_df, results_df_wrapped = run_analysis_pipeline(
         save_figures=True,
         use_hdpose=True,  # Set to False to skip hdPose calculation (faster)
         verbose=True
@@ -1278,10 +1552,21 @@ if __name__ == "__main__":
     print("\n" + "=" * 80)
     print("ANALYSIS COMPLETE")
     print("=" * 80)
-    print(f"\nOutput directory: {OUTPUT_DIR}")
+
+    print(f"\n--- UNWRAPPED ANALYSIS ---")
+    print(f"Output directory: {OUTPUT_DIR}")
     print("\nFiles generated:")
     print("  - trial_data.csv: Trial-level data with heading and CW/CCW metrics")
     print("  - summary_statistics.csv: Statistical analysis results")
     print("  - figures/fig1_scatter_dark_trials.pdf: Main scatter plots")
     print("  - figures/fig2_forest_plot.pdf: Effect size forest plot")
     print("  - figures/fig3_polar_distributions.pdf: Polar histograms")
+
+    print(f"\n--- WRAPPED ANALYSIS (angles wrapped to [-pi, +pi]) ---")
+    print(f"Output directory: {OUTPUT_DIR_WRAPPED}")
+    print("\nFiles generated:")
+    print("  - trial_data_wrapped.csv: Trial-level data with wrapped CW/CCW metrics")
+    print("  - summary_statistics_wrapped.csv: Statistical analysis results (wrapped)")
+    print("  - figures/fig1_scatter_dark_trials_wrapped.pdf: Main scatter plots (wrapped)")
+    print("  - figures/fig2_forest_plot_wrapped.pdf: Effect size forest plot (wrapped)")
+    print("  - figures/fig3_polar_distributions_wrapped.pdf: Polar histograms (wrapped)")

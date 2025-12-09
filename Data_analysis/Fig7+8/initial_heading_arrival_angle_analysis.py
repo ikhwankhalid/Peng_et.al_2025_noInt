@@ -846,7 +846,7 @@ def plot_forest_effect_sizes(ax, results_df, effect_column='r',
                markersize=10, label='Significant (FDR<0.05)', markeredgecolor='black'),
         Line2D([0], [0], marker='o', color='w', markerfacecolor='steelblue',
                markersize=10, label='Not significant', markeredgecolor='black'),
-        Line2D([0], [0], color='gray', linestyle=':', label='Small effect (|r|=0.1)')
+        Line2D([0], [0], color='gray', linestyle=':', label='|r|=0.1')
     ]
     ax.legend(handles=legend_elements, loc='lower right', fontsize=9, framealpha=0.9)
 
