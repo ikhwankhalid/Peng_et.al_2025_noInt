@@ -676,6 +676,172 @@ def test_section_accumulation(data):
         }
 
 # =============================================================================
+# SECTION ENDPOINT ANALYSIS
+# =============================================================================
+
+def extract_section_endpoints(section_data):
+    """
+    Extract the final timepoint of each pure turn section.
+
+    This provides one data point per section where:
+    - integrated_ang_vel = total cumulative turn in section
+    - mvtDirError = heading error at section end
+
+    This eliminates the zero-clustering issue where early timepoints in each
+    section have near-zero cumulative turn values, confounding the regression.
+
+    Parameters
+    ----------
+    section_data : DataFrame
+        Full section data with all timepoints
+
+    Returns
+    -------
+    endpoints : DataFrame
+        One row per section with endpoint values
+    """
+    if len(section_data) == 0:
+        return pd.DataFrame()
+
+    # Group by unique section identifier and take last row
+    section_data = section_data.copy()
+    section_data['unique_section_key'] = (
+        section_data['condition'].astype(str) + '_' +
+        section_data['speed_threshold'].astype(str) + '_' +
+        section_data['trial_id'].astype(str) + '_' +
+        section_data['section_id'].astype(str)
+    )
+
+    endpoints = section_data.groupby('unique_section_key').apply(
+        lambda x: x.iloc[-1]
+    ).reset_index(drop=True)
+
+    endpoints = endpoints.drop(columns=['unique_section_key'], errors='ignore')
+
+    return endpoints
+
+
+def regression_on_endpoints(endpoints, condition_name, speed_threshold):
+    """
+    Perform regression analysis on section endpoints only.
+
+    Tests: Does total accumulated turn predict heading error at section end?
+    """
+    results = {
+        'condition': condition_name,
+        'speed_threshold': speed_threshold,
+        'analysis_type': 'endpoints',
+        'n_sections': len(endpoints)
+    }
+
+    left_endpoints = endpoints[endpoints['turn_direction'] == 'left']
+    right_endpoints = endpoints[endpoints['turn_direction'] == 'right']
+
+    results['n_left_sections'] = len(left_endpoints)
+    results['n_right_sections'] = len(right_endpoints)
+
+    X = endpoints['integrated_ang_vel'].values
+    Y = endpoints['mvtDirError'].values
+
+    valid = ~(np.isnan(X) | np.isnan(Y))
+    X_valid = X[valid]
+    Y_valid = Y[valid]
+
+    if len(X_valid) > 10:
+        slope, intercept, r, p, se = stats.linregress(X_valid, Y_valid)
+
+        results['beta_signed'] = slope
+        results['intercept_signed'] = intercept
+        results['r_signed'] = r
+        results['r_squared_signed'] = r**2
+        results['p_signed'] = p
+        results['se_signed'] = se
+
+        from scipy.stats import t as t_dist
+        df = len(X_valid) - 2
+        t_crit = t_dist.ppf(0.975, df)
+        results['ci_lower_95'] = slope - t_crit * se
+        results['ci_upper_95'] = slope + t_crit * se
+
+        results['integrated_ang_vel_mean'] = np.mean(X_valid)
+        results['integrated_ang_vel_std'] = np.std(X_valid)
+        results['mvtDirError_mean'] = np.mean(Y_valid)
+        results['mvtDirError_std'] = np.std(Y_valid)
+    else:
+        results['beta_signed'] = np.nan
+        results['intercept_signed'] = np.nan
+        results['r_signed'] = np.nan
+        results['r_squared_signed'] = np.nan
+        results['p_signed'] = np.nan
+        results['se_signed'] = np.nan
+        results['ci_lower_95'] = np.nan
+        results['ci_upper_95'] = np.nan
+        results['integrated_ang_vel_mean'] = np.nan
+        results['integrated_ang_vel_std'] = np.nan
+        results['mvtDirError_mean'] = np.nan
+        results['mvtDirError_std'] = np.nan
+
+    # Left turn regression
+    if len(left_endpoints) > 10:
+        X_left = left_endpoints['integrated_ang_vel'].values
+        Y_left = left_endpoints['mvtDirError'].values
+        valid_left = ~(np.isnan(X_left) | np.isnan(Y_left))
+        X_left = X_left[valid_left]
+        Y_left = Y_left[valid_left]
+
+        if len(X_left) > 10:
+            slope_left, _, _, p_left, se_left = stats.linregress(X_left, Y_left)
+            results['beta_left'] = slope_left
+            results['p_left'] = p_left
+            results['se_left'] = se_left
+        else:
+            results['beta_left'] = np.nan
+            results['p_left'] = np.nan
+            results['se_left'] = np.nan
+    else:
+        results['beta_left'] = np.nan
+        results['p_left'] = np.nan
+        results['se_left'] = np.nan
+
+    # Right turn regression
+    if len(right_endpoints) > 10:
+        X_right = right_endpoints['integrated_ang_vel'].values
+        Y_right = right_endpoints['mvtDirError'].values
+        valid_right = ~(np.isnan(X_right) | np.isnan(Y_right))
+        X_right = X_right[valid_right]
+        Y_right = Y_right[valid_right]
+
+        if len(X_right) > 10:
+            slope_right, _, _, p_right, se_right = stats.linregress(X_right, Y_right)
+            results['beta_right'] = slope_right
+            results['p_right'] = p_right
+            results['se_right'] = se_right
+        else:
+            results['beta_right'] = np.nan
+            results['p_right'] = np.nan
+            results['se_right'] = np.nan
+    else:
+        results['beta_right'] = np.nan
+        results['p_right'] = np.nan
+        results['se_right'] = np.nan
+
+    # Asymmetry test
+    if not np.isnan(results.get('beta_left', np.nan)) and not np.isnan(results.get('beta_right', np.nan)):
+        results['beta_diff'] = results['beta_left'] - results['beta_right']
+        se_diff = np.sqrt(results['se_left']**2 + results['se_right']**2)
+        z_stat = results['beta_diff'] / se_diff if se_diff > 0 else 0
+        p_diff = 2 * (1 - stats.norm.cdf(abs(z_stat)))
+        results['z_asymmetry'] = z_stat
+        results['p_asymmetry'] = p_diff
+    else:
+        results['beta_diff'] = np.nan
+        results['z_asymmetry'] = np.nan
+        results['p_asymmetry'] = np.nan
+
+    return results
+
+
+# =============================================================================
 # MAIN PROCESSING PIPELINE
 # =============================================================================
 
@@ -684,7 +850,7 @@ def process_all_conditions(df, conditions, speed_thresholds, min_bout_length=5,
                            max_integrated=None):
     """
     Process all conditions and speed thresholds.
-    
+
     Parameters
     ----------
     df : DataFrame
@@ -701,16 +867,22 @@ def process_all_conditions(df, conditions, speed_thresholds, min_bout_length=5,
         Near-zero threshold for angular velocity
     max_integrated : float, optional
         Maximum absolute integrated angular velocity for truncation
-    
+
     Returns
     -------
     all_section_data : DataFrame
-        Combined section data across all conditions
+        Combined section data across all conditions (all timepoints)
     regression_results : DataFrame
-        Regression statistics for each condition/threshold
+        Regression statistics for each condition/threshold (all timepoints)
+    all_endpoint_data : DataFrame
+        Combined endpoint data across all conditions (one row per section)
+    endpoint_regression_results : DataFrame
+        Regression statistics for endpoints (one row per section)
     """
     all_section_data = []
     regression_results = []
+    all_endpoint_data = []
+    endpoint_regression_results = []
     
     for condition in conditions:
         print(f"\n{'='*60}")
@@ -757,38 +929,67 @@ def process_all_conditions(df, conditions, speed_thresholds, min_bout_length=5,
                 print(f"    Left timepoints: {(combined['turn_direction'] == 'left').sum()}")
                 print(f"    Right timepoints: {(combined['turn_direction'] == 'right').sum()}")
                 
-                # Regression by turn direction (old approach)
+                # Regression by turn direction (old approach - all timepoints)
                 reg_results_old = regression_by_turn_direction(combined, condition, speed_threshold)
-                
-                # Signed regression (new approach)
+
+                # Signed regression (new approach - all timepoints)
                 reg_results_signed = signed_regression_analysis(combined, condition, speed_threshold)
-                
+
                 # Merge results
                 reg_results = {**reg_results_old, **reg_results_signed}
-                
+
                 # Accumulation test
                 accum_results = test_section_accumulation(combined)
                 reg_results.update(accum_results)
-                
+
                 regression_results.append(reg_results)
-                
-                print(f"    SPLIT BY DIRECTION:")
-                print(f"      beta_left: {reg_results['beta_left']:.6f}, p={reg_results['p_left']:.4f}")
-                print(f"      beta_right: {reg_results['beta_right']:.6f}, p={reg_results['p_right']:.4f}")
-                print(f"      Asymmetry: beta_diff={reg_results['beta_diff']:.6f}, p={reg_results['p_asymmetry']:.4f}")
-                print(f"    SIGNED REGRESSION:")
-                print(f"      beta_signed: {reg_results['beta_signed']:.6f}, p={reg_results['p_signed']:.4f}")
-                print(f"      R²={reg_results['r_squared_signed']:.4f}, 95% CI=[{reg_results['ci_lower_95']:.6f}, {reg_results['ci_upper_95']:.6f}]")
-    
+
+                # ============================================================
+                # ENDPOINT ANALYSIS (one data point per section)
+                # ============================================================
+                endpoints = extract_section_endpoints(combined)
+                if len(endpoints) > 0:
+                    all_endpoint_data.append(endpoints)
+
+                    # Endpoint regression
+                    endpoint_reg_results = regression_on_endpoints(
+                        endpoints, condition, speed_threshold
+                    )
+                    endpoint_regression_results.append(endpoint_reg_results)
+
+                    print(f"    ENDPOINT ANALYSIS (n={len(endpoints)} sections):")
+                    if not np.isnan(endpoint_reg_results.get('beta_signed', np.nan)):
+                        print(f"      beta_signed: {endpoint_reg_results['beta_signed']:.6f}, p={endpoint_reg_results['p_signed']:.4f}")
+                        print(f"      R²={endpoint_reg_results['r_squared_signed']:.4f}, 95% CI=[{endpoint_reg_results['ci_lower_95']:.6f}, {endpoint_reg_results['ci_upper_95']:.6f}]")
+                    else:
+                        print(f"      Insufficient data for endpoint regression")
+
+                print(f"    ALL TIMEPOINTS ANALYSIS:")
+                print(f"      SPLIT BY DIRECTION:")
+                print(f"        beta_left: {reg_results['beta_left']:.6f}, p={reg_results['p_left']:.4f}")
+                print(f"        beta_right: {reg_results['beta_right']:.6f}, p={reg_results['p_right']:.4f}")
+                print(f"        Asymmetry: beta_diff={reg_results['beta_diff']:.6f}, p={reg_results['p_asymmetry']:.4f}")
+                print(f"      SIGNED REGRESSION:")
+                print(f"        beta_signed: {reg_results['beta_signed']:.6f}, p={reg_results['p_signed']:.4f}")
+                print(f"        R²={reg_results['r_squared_signed']:.4f}, 95% CI=[{reg_results['ci_lower_95']:.6f}, {reg_results['ci_upper_95']:.6f}]")
+
     # Combine results
     if len(all_section_data) > 0:
         all_section_data = pd.concat(all_section_data, ignore_index=True)
     else:
         all_section_data = pd.DataFrame()
-    
+
     regression_results = pd.DataFrame(regression_results)
-    
-    return all_section_data, regression_results
+
+    # Combine endpoint results
+    if len(all_endpoint_data) > 0:
+        all_endpoint_data = pd.concat(all_endpoint_data, ignore_index=True)
+    else:
+        all_endpoint_data = pd.DataFrame()
+
+    endpoint_regression_results = pd.DataFrame(endpoint_regression_results)
+
+    return all_section_data, regression_results, all_endpoint_data, endpoint_regression_results
 
 # =============================================================================
 # MAIN EXECUTION
@@ -827,7 +1028,7 @@ if __name__ == "__main__":
     print("PROCESSING ALL CONDITIONS")
     print("="*80)
     
-    all_section_data, regression_results = process_all_conditions(
+    all_section_data, regression_results, all_endpoint_data, endpoint_regression_results = process_all_conditions(
         dfAutoPI,
         CONDITIONS,
         SPEED_THRESHOLDS,
@@ -836,25 +1037,39 @@ if __name__ == "__main__":
         ANGULAR_VELOCITY_THRESHOLD,
         MAX_INTEGRATED_THRESHOLD
     )
-    
+
     # Save results
     print("\n" + "="*80)
     print("SAVING RESULTS")
     print("="*80)
-    
+
     results_dir = os.path.join(PROJECT_DATA_PATH, "results")
-    
+
+    # Save all-timepoints data
     if len(all_section_data) > 0:
         section_data_fn = os.path.join(results_dir, "pure_turn_section_data.csv")
         all_section_data.to_csv(section_data_fn, index=False)
-        print(f"Saved section data: {section_data_fn}")
+        print(f"Saved section data (all timepoints): {section_data_fn}")
         print(f"  Total rows: {len(all_section_data):,}")
-    
+
     if len(regression_results) > 0:
         reg_results_fn = os.path.join(results_dir, "pure_turn_section_regression_results.csv")
         regression_results.to_csv(reg_results_fn, index=False)
-        print(f"Saved regression results: {reg_results_fn}")
+        print(f"Saved regression results (all timepoints): {reg_results_fn}")
         print(f"  Total rows: {len(regression_results)}")
+
+    # Save endpoint data (one row per section - fixes zero-clustering)
+    if len(all_endpoint_data) > 0:
+        endpoint_data_fn = os.path.join(results_dir, "pure_turn_section_endpoints.csv")
+        all_endpoint_data.to_csv(endpoint_data_fn, index=False)
+        print(f"Saved endpoint data (one per section): {endpoint_data_fn}")
+        print(f"  Total sections: {len(all_endpoint_data):,}")
+
+    if len(endpoint_regression_results) > 0:
+        endpoint_reg_fn = os.path.join(results_dir, "pure_turn_section_endpoints_regression.csv")
+        endpoint_regression_results.to_csv(endpoint_reg_fn, index=False)
+        print(f"Saved endpoint regression results: {endpoint_reg_fn}")
+        print(f"  Total rows: {len(endpoint_regression_results)}")
     
     # Print summary
     print("\n" + "="*80)

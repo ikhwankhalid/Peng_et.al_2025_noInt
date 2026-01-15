@@ -426,6 +426,145 @@ def plot_section_distribution(data, condition_name, speed_threshold,
 
 
 # =============================================================================
+# ENDPOINT ANALYSIS VISUALIZATION (fixes zero-clustering)
+# =============================================================================
+
+def plot_endpoint_comparison(endpoints, condition_name, speed_threshold, save_path=None):
+    """Create scatter plot using only section endpoints."""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    X = endpoints['integrated_ang_vel'].values
+    Y = endpoints['mvtDirError'].values
+
+    valid = ~(np.isnan(X) | np.isnan(Y))
+    X = X[valid]
+    Y = Y[valid]
+
+    if len(X) < 10:
+        print(f"Warning: Not enough endpoint data for {condition_name}, speed {speed_threshold}")
+        plt.close(fig)
+        return None
+
+    slope_signed, intercept_signed, r_signed, p_signed, _ = stats.linregress(X, Y)
+
+    turn_dirs = endpoints['turn_direction'].values[valid]
+    left_mask = turn_dirs == 'left'
+    right_mask = turn_dirs == 'right'
+
+    X_left, Y_left = X[left_mask], Y[left_mask]
+    X_right, Y_right = X[right_mask], Y[right_mask]
+
+    slope_left = np.nan
+    slope_right = np.nan
+
+    if len(X_left) > 10:
+        slope_left, intercept_left, _, _, _ = stats.linregress(X_left, Y_left)
+    if len(X_right) > 10:
+        slope_right, intercept_right, _, _, _ = stats.linregress(X_right, Y_right)
+
+    # Left panel: Signed
+    ax = axes[0]
+    ax.scatter(X, Y, alpha=0.5, s=20, c='gray', rasterized=True)
+    x_line = np.array([X.min(), X.max()])
+    ax.plot(x_line, slope_signed * x_line + intercept_signed, 'r-', linewidth=2)
+    ax.axhline(0, color='k', linestyle='--', alpha=0.3)
+    ax.axvline(0, color='k', linestyle='--', alpha=0.3)
+    ax.set_xlabel('Total Turn In Section (rad)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Heading Deviation at Section End (rad)', fontsize=12, fontweight='bold')
+    ax.set_title(f'Signed Regression (ENDPOINTS)\nβ={slope_signed:.4f}, R²={r_signed**2:.3f}', fontsize=11)
+    ax.grid(True, alpha=0.3)
+
+    # Right panel: Split
+    ax = axes[1]
+    if len(X_left) > 0:
+        ax.scatter(X_left, Y_left, alpha=0.5, s=20, c='blue', label=f'Left (n={len(X_left)})')
+    if len(X_right) > 0:
+        ax.scatter(X_right, Y_right, alpha=0.5, s=20, c='orange', label=f'Right (n={len(X_right)})')
+    if not np.isnan(slope_left):
+        ax.plot([X_left.min(), X_left.max()], [slope_left * X_left.min() + intercept_left, slope_left * X_left.max() + intercept_left], 'b-', linewidth=2)
+    if not np.isnan(slope_right):
+        ax.plot([X_right.min(), X_right.max()], [slope_right * X_right.min() + intercept_right, slope_right * X_right.max() + intercept_right], color='orange', linewidth=2)
+    ax.axhline(0, color='k', linestyle='--', alpha=0.3)
+    ax.axvline(0, color='k', linestyle='--', alpha=0.3)
+    ax.set_xlabel('Total Turn In Section (rad)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Heading Deviation at Section End (rad)', fontsize=12, fontweight='bold')
+    ax.set_title(f'Split by Direction (ENDPOINTS)\nβ_left={slope_left:.4f}, β_right={slope_right:.4f}', fontsize=11)
+    ax.legend(loc='best')
+    ax.grid(True, alpha=0.3)
+
+    fig.suptitle(f'{condition_name} | Speed ≥ {speed_threshold} cm/s\nSECTION ENDPOINTS ONLY (n={len(X)} sections)', fontsize=13, fontweight='bold', y=1.02)
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved: {save_path}")
+
+    return fig
+
+
+def plot_endpoint_summary(endpoint_regression_results, save_path=None):
+    """Create summary plot for endpoint analysis across all conditions."""
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    valid_data = endpoint_regression_results.dropna(subset=['beta_signed', 'p_signed']).copy()
+    if len(valid_data) == 0:
+        print("No valid endpoint results to plot")
+        return None
+
+    valid_data['label'] = valid_data['condition'] + "\n" + valid_data['speed_threshold'].astype(str) + "cm/s"
+    x = np.arange(len(valid_data))
+
+    # Beta coefficients
+    ax = axes[0, 0]
+    colors = ['green' if b < 0 else 'red' for b in valid_data['beta_signed']]
+    ax.bar(x, valid_data['beta_signed'], color=colors, alpha=0.7)
+    ax.axhline(0, color='k', linestyle='--')
+    ax.set_ylabel('Beta Coefficient (Endpoints)')
+    ax.set_title('Regression Slopes: Endpoint Analysis')
+    ax.set_xticks(x)
+    ax.set_xticklabels(valid_data['label'], rotation=45, ha='right', fontsize=8)
+    ax.grid(True, alpha=0.3, axis='y')
+
+    # R-squared
+    ax = axes[0, 1]
+    ax.bar(x, valid_data['r_squared_signed'], color='darkred', alpha=0.7)
+    ax.set_ylabel('R² (Endpoint Regression)')
+    ax.set_title('Explained Variance')
+    ax.set_xticks(x)
+    ax.set_xticklabels(valid_data['label'], rotation=45, ha='right', fontsize=8)
+    ax.grid(True, alpha=0.3, axis='y')
+
+    # P-values
+    ax = axes[1, 0]
+    ax.bar(x, -np.log10(valid_data['p_signed']), color='purple', alpha=0.7)
+    ax.axhline(-np.log10(0.05), color='r', linestyle='--', label='p=0.05')
+    ax.set_ylabel('-log10(p-value)')
+    ax.set_title('Statistical Significance')
+    ax.set_xticks(x)
+    ax.set_xticklabels(valid_data['label'], rotation=45, ha='right', fontsize=8)
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+
+    # Sample size
+    ax = axes[1, 1]
+    ax.bar(x, valid_data['n_sections'], color='steelblue', alpha=0.7)
+    ax.set_ylabel('Number of Sections')
+    ax.set_title('Sample Size per Condition')
+    ax.set_xticks(x)
+    ax.set_xticklabels(valid_data['label'], rotation=45, ha='right', fontsize=8)
+    ax.grid(True, alpha=0.3, axis='y')
+
+    fig.suptitle('ENDPOINT ANALYSIS SUMMARY\n(One point per section - no zero-clustering)', fontsize=14, fontweight='bold', y=1.02)
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved: {save_path}")
+
+    return fig
+
+
+# =============================================================================
 # MAIN EXECUTION
 # =============================================================================
 
@@ -459,10 +598,33 @@ if __name__ == "__main__":
     regression_results = pd.read_csv(reg_results_fn)
     print(f"Loaded {len(regression_results)} conditions")
 
+    # Load endpoint data
+    endpoint_data_fn = os.path.join(RESULTS_PATH, "pure_turn_section_endpoints.csv")
+    endpoint_data = None
+    if os.path.exists(endpoint_data_fn):
+        print(f"Loading endpoint data: {endpoint_data_fn}")
+        endpoint_data = pd.read_csv(endpoint_data_fn)
+        print(f"Loaded {len(endpoint_data):,} section endpoints")
+    else:
+        print(f"Note: Endpoint data file not found: {endpoint_data_fn}")
+        print("  Run pure_turn_sections_analysis.py to generate endpoint data")
+
+    # Load endpoint regression results
+    endpoint_reg_fn = os.path.join(RESULTS_PATH, "pure_turn_section_endpoints_regression.csv")
+    endpoint_regression_results = None
+    if os.path.exists(endpoint_reg_fn):
+        print(f"Loading endpoint regression results: {endpoint_reg_fn}")
+        endpoint_regression_results = pd.read_csv(endpoint_reg_fn)
+        print(f"Loaded {len(endpoint_regression_results)} endpoint regression results")
+
     # Create output directory for this analysis
     output_dir = os.path.join(FIGURES_PATH, "pure_turn_sections_analysis")
     os.makedirs(output_dir, exist_ok=True)
     print(f"\nSaving figures to: {output_dir}")
+
+    # Create subdirectory for endpoint plots
+    endpoint_dir = os.path.join(output_dir, "endpoints")
+    os.makedirs(endpoint_dir, exist_ok=True)
 
     # =========================================================================
     # Generate comparison plots for each condition
@@ -510,6 +672,26 @@ if __name__ == "__main__":
         if fig:
             plt.close(fig)
 
+        # Endpoint comparison plot (fixes zero-clustering)
+        if endpoint_data is not None:
+            endpoint_condition_data = endpoint_data[
+                (endpoint_data['condition'] == condition) &
+                (endpoint_data['speed_threshold'] == speed_threshold)
+            ]
+
+            if len(endpoint_condition_data) >= 10:
+                endpoint_save_path = os.path.join(
+                    endpoint_dir,
+                    f"comparison_endpoints_{safe_condition}_speed{speed_threshold}.png")
+
+                fig = plot_endpoint_comparison(
+                    endpoint_condition_data, condition, speed_threshold,
+                    endpoint_save_path)
+                if fig:
+                    plt.close(fig)
+            else:
+                print(f"  Skipping endpoint plot - insufficient data ({len(endpoint_condition_data)} sections)")
+
     # =========================================================================
     # Generate summary comparison plot
     # =========================================================================
@@ -522,11 +704,27 @@ if __name__ == "__main__":
     if fig:
         plt.close(fig)
 
+    # =========================================================================
+    # Generate endpoint summary plot
+    # =========================================================================
+    if endpoint_regression_results is not None and len(endpoint_regression_results) > 0:
+        print("\n" + "="*80)
+        print("GENERATING ENDPOINT SUMMARY PLOT")
+        print("="*80)
+
+        endpoint_summary_path = os.path.join(endpoint_dir, "summary_endpoints_all_conditions.png")
+        fig = plot_endpoint_summary(endpoint_regression_results, endpoint_summary_path)
+        if fig:
+            plt.close(fig)
+
     print("\n" + "="*80)
     print("VISUALIZATION COMPLETE")
     print("="*80)
     print(f"\nAll figures saved to: {output_dir}")
     print("\nKey figures:")
-    print("  - summary_all_conditions.png: Overall comparison across conditions")
-    print("  - comparison_*.png: Individual condition comparisons")
+    print("  - summary_all_conditions.png: Overall comparison across conditions (all timepoints)")
+    print("  - comparison_*.png: Individual condition comparisons (all timepoints)")
     print("  - distribution_*.png: Section property distributions")
+    print(f"\nEndpoint figures (fixes zero-clustering) saved to: {endpoint_dir}")
+    print("  - summary_endpoints_all_conditions.png: Endpoint analysis summary")
+    print("  - comparison_endpoints_*.png: Individual endpoint comparisons")
